@@ -1,17 +1,16 @@
 # Kaspa Genesis Proof
 
-A comprehensive toolkit for verifying the cryptographic integrity of the Kaspa blockchain, supporting both Go-based kaspad and Rust-based rusty-kaspa nodes.
+Tools for cryptographically verifying the integrity of the Kaspa blockchain, supporting both Go-based kaspad and Rust-based rusty-kaspa nodes.
 
 ## Overview
 
-This repository provides tools to cryptographically verify that the current UTXO set of Kaspa has naturally evolved from an empty UTXO set, validating the assertion that there was no premine.
+This repository provides tools to cryptographically verify that the current UTXO set of Kaspa has naturally evolved from an empty UTXO set, validating that there was no premine.
 
 ## Trusted Source Reference
 
-**This work is based on the original genesis proof by Shai Wyborski and Michael Sutton:**
+**Based on the original genesis proof by Shai Wyborski and Michael Sutton:**
 - **Original Source:** https://github.com/kaspagang/kaspad-py-explorer/blob/main/src/genesis_proof.ipynb
 - **Authors:** Shai Wyborski, Michael Sutton
-- **Trust Chain:** This is the authoritative genesis proof implementation used by the Kaspa community
 
 **My Contribution:** I have extended the original work to support Rust-based rusty-kaspa nodes while maintaining 100% of the original verification logic and cryptographic guarantees.
 
@@ -72,33 +71,29 @@ jupyter notebook verification/genesis_proof.ipynb
 
 ```
 kaspa-genesis-proof/
-├── verify_kaspa_genesis.py        # Command-line verification script
+├── verify_kaspa_genesis.py           # Command-line verification script
 ├── verification/
-│   ├── genesis_proof.ipynb        # Interactive verification notebook
-│   ├── store_rust.py              # RocksDB + Bincode support for Rust nodes
-│   └── store.py                   # LevelDB + Protobuf support for Go nodes
+│   ├── genesis_proof.ipynb           # Interactive verification notebook
+│   ├── store_rust.py                 # RocksDB + Bincode support for Rust nodes
+│   ├── store_checkpoint.py           # Optimized checkpoint data reader
+│   ├── checkpoint_data.json          # Pre-extracted headers (avoids 1GB download)
+│   └── store.py                      # LevelDB + Protobuf support for Go nodes
 └── docs/
-    ├── SETUP_GUIDE.md             # Detailed setup instructions
-    └── TECHNICAL_NOTES.md         # Design decisions and implementation details
+    ├── SETUP_GUIDE.md                # Detailed setup instructions
+    └── TECHNICAL_NOTES.md            # Design decisions and implementation details
 ```
 
 ## Verification Process
 
-The verification process follows these cryptographic steps:
+The verification follows these cryptographic steps:
 
-1. **Hash Chain Verification:** Verify the hashes of the pruning block chain
-2. **Coinbase Transaction Verification:** Reconstruct and verify genesis coinbase transactions
-3. **Checkpoint Verification:** Verify checkpoint block hash matches Discord announcement
-4. **Bitcoin Timestamp Verification:** Verify Bitcoin block references for timestamp validation
-5. **UTXO Set Verification:** Verify UTXO set consistency between checkpoint and genesis
-6. **Original Genesis Verification:** Verify original genesis has empty UTXO set
-
-## Security Guarantees
-
-This verification provides cryptographic proof of Kaspa's integrity relying on:
-- **Blake2b collision resistance** for chain integrity
-- **MuHash collision resistance** for UTXO set consistency  
-- **Bitcoin blockchain integrity** for timestamp validation
+1. **Database Connectivity:** Verify connection to Kaspa node database
+2. **Current Chain State:** Read current DAG tips and headers selected tip
+3. **Genesis Header Verification:** Load and verify current genesis block hash
+4. **Genesis Coinbase Transaction:** Verify genesis transaction hash matches merkle root
+5. **Hash Chain Verification:** Verify pruning chain from current tip to genesis
+6. **UTXO Commitment Analysis:** Analyze genesis UTXO commitment (non-empty due to checkpoint)
+7. **Pre-Checkpoint Verification:** Verify chain from checkpoint to original genesis with empty UTXO set
 
 ## Node Compatibility
 
@@ -111,13 +106,3 @@ This verification provides cryptographic proof of Kaspa's integrity relying on:
 
 - **[Setup Guide](docs/SETUP_GUIDE.md)** - Detailed installation and usage instructions
 - **[Verification Notebook](verification/genesis_proof.ipynb)** - Interactive step-by-step verification
-
-## Features
-
-- **Dual Node Support:** Works with both Go-based kaspad and Rust-based rusty-kaspa nodes
-- **Pure Python Implementation:** No external compilers or build tools required
-- **Multiple Interfaces:** Command-line script for quick verification, Jupyter notebook for exploration
-- **User-Friendly:** Clear configuration and comprehensive error messages
-- **Platform Support:** Works on macOS, Linux, and Windows with platform-specific paths
-- **Google Colab Ready:** Complete instructions for cloud-based verification
-- **Comprehensive Testing:** Built-in database connectivity tests and troubleshooting guides

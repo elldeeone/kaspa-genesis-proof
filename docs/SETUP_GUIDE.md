@@ -3,12 +3,12 @@
 ## Prerequisites
 
 ### For Rust-based rusty-kaspa nodes (Recommended):
-- **Fully synced rusty-kaspa node** (database size: ~40GB+)
+- **Fully synced rusty-kaspa node**
 - **Python 3.8+**
 - **Node data location**: `~/.rusty-kaspa/kaspa-mainnet/datadir/consensus/consensus-003`
 
 ### For Go-based kaspad nodes (Legacy):
-- **Fully synced kaspad node** (database size: ~40GB+)
+- **Fully synced kaspad node**
 - **Python 3.8+**
 - **Node data location**: `~/.kaspad/kaspa-mainnet/datadir2`
 
@@ -40,13 +40,22 @@ pip install -r requirements.txt
 pip install numpy pandas plyvel protobuf==3.20.0 tqdm notebook
 ```
 
-### 3. Configure Database Paths
+### 3. Run Verification
 
-Edit the notebook `genesis_proof.ipynb` and update the paths in **cell 2**:
+**Option A: Command-line script (recommended for quick verification)**
+```bash
+# For Rust nodes:
+python verify_kaspa_genesis.py --node-type rust --datadir ~/.rusty-kaspa/kaspa-mainnet/datadir
 
-```python
-# Update this line with your actual database path:
-current_datadir = os.path.expanduser("~/.rusty-kaspa/kaspa-mainnet/datadir/consensus/consensus-003")
+# For Go nodes:
+python verify_kaspa_genesis.py --node-type go --datadir ~/.kaspad/kaspa-mainnet/datadir2
+```
+
+**Option B: Interactive notebook (recommended for detailed exploration)**
+```bash
+# Edit verification/genesis_proof.ipynb cell 14 to update your database path
+# Then run:
+jupyter notebook verification/genesis_proof.ipynb
 ```
 
 **Common paths by platform:**
@@ -57,13 +66,7 @@ current_datadir = os.path.expanduser("~/.rusty-kaspa/kaspa-mainnet/datadir/conse
 | **Linux** | `~/.rusty-kaspa/kaspa-mainnet/datadir/consensus/consensus-003` | `~/.kaspad/kaspa-mainnet/datadir2` |
 | **Windows** | `%APPDATA%\.rusty-kaspa\kaspa-mainnet\datadir\consensus\consensus-003` | `%APPDATA%\.kaspad\kaspa-mainnet\datadir2` |
 
-### 5. Run Verification
-
-```bash
-jupyter notebook genesis_proof.ipynb
-```
-
-Execute all cells in order. The verification should complete successfully with all assertions passing.
+**Note:** The verification script will automatically detect the consensus database directory within your datadir.
 
 ## Troubleshooting
 
@@ -90,14 +93,7 @@ For Google Colab users, use the commented section in **cell 2** of the notebook:
 2. **Uncomment Colab section**: In cell 2, uncomment the Google Colab installation commands
 3. **Run verification**: Execute all cells normally
 
-## Expected Results
-
-When working correctly, you should see:
-
-✅ **Database connectivity test passed**  
-✅ **Genesis header loaded successfully**  
-✅ **All cryptographic assertions pass**  
-✅ **Final message**: "Thank you for taking the time to authenticate the integrity of Kaspa."
+**Note:** The pre-extracted `checkpoint_data.json` file (128KB) eliminates the need to download the 1GB checkpoint database in most cases.
 
 ## Support
 
