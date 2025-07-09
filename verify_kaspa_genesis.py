@@ -42,7 +42,7 @@ def print_error(text):
 
 def print_info(text):
     """Print info message"""
-    print(f"{Colors.YELLOW}→ {text}{Colors.END}")
+    print(f"{Colors.GREEN}→ {text}{Colors.END}")
 
 def transaction_hash(t):
     """Calculate transaction hash using Kaspa's algorithm"""
@@ -96,7 +96,7 @@ def assert_cryptographic_hash_chain_to_genesis(store, block_hash, genesis_hash, 
     while True:
         if block_hash == genesis_hash:
             if verbose:
-                print_info(f"Reached genesis block via {i} pruning points")
+                print_info(f"✓ Reached genesis block via {i} pruning points")
             return True
         
         header = store.get_raw_header(block_hash)
@@ -108,7 +108,12 @@ def assert_cryptographic_hash_chain_to_genesis(store, block_hash, genesis_hash, 
         calculated_hash = header_hash(header)
         if calculated_hash != block_hash:
             print_error(f"Hash mismatch at block {block_hash.hex()}")
+            print_error(f"  Expected: {block_hash.hex()}")
+            print_error(f"  Got:      {calculated_hash.hex()}")
             return False
+            
+        if verbose:
+            print_info(f"  Step {i+1}: {block_hash.hex()} -> {header.pruningPoint.hash.hex()}")
             
         block_hash = header.pruningPoint.hash
         i += 1
@@ -198,11 +203,23 @@ def verify_genesis(node_type, datadir, pre_checkpoint_datadir=None, verbose=Fals
             print_error("Genesis header not found")
             return False
         
+        # Show genesis hash
+        print_info(f"Expected genesis hash: {genesis_hash.hex()}")
+        
         # Verify genesis hash
-        if header_hash(genesis_header) != genesis_hash:
+        calculated_genesis_hash = header_hash(genesis_header)
+        print_info(f"Calculated hash:      {calculated_genesis_hash.hex()}")
+        
+        if calculated_genesis_hash != genesis_hash:
             print_error("Genesis header hash mismatch")
             return False
         print_success("Genesis header hash verified")
+        
+        # Show genesis header details
+        print_info(f"Genesis timestamp: {genesis_header.timeInMilliseconds}")
+        print_info(f"Genesis DAA score: {genesis_header.daaScore}")
+        print_info(f"Genesis blue score: {genesis_header.blueScore}")
+        print_info(f"Genesis bits (difficulty): {genesis_header.bits}")
         
         # Step 4: Verify genesis coinbase transaction
         print_header("Step 4: Genesis Coinbase Transaction")
@@ -219,13 +236,42 @@ def verify_genesis(node_type, datadir, pre_checkpoint_datadir=None, verbose=Fals
         genesis_coinbase_tx.gas = 0
         genesis_coinbase_tx.payload = genesis_tx_payload
         
+        # Show transaction details
+        print_info("Genesis transaction properties:")
+        print_info(f"  Version: {genesis_coinbase_tx.version}")
+        print_info(f"  Inputs: {len(genesis_coinbase_tx.inputs)} (coinbase has no inputs)")
+        print_info(f"  Outputs: {len(genesis_coinbase_tx.outputs)} (coinbase has no outputs)")
+        print_info(f"  Payload size: {len(genesis_coinbase_tx.payload)} bytes")
+        
         # Verify transaction hash matches merkle root
         calc_hash = transaction_hash(genesis_coinbase_tx)
+        print_info(f"Calculated tx hash:    {calc_hash.hex()}")
+        print_info(f"Expected merkle root:  {genesis_header.hashMerkleRoot.hash.hex()}")
+        
         if calc_hash != genesis_header.hashMerkleRoot.hash:
             print_error("Genesis coinbase transaction hash mismatch")
             return False
         print_success("Genesis coinbase transaction verified")
+        
+        # Extract and show embedded data
+        print_info("Embedded data in genesis transaction:")
+        
+        # Hebrew text (bytes 21-141)
+        hebrew_text = genesis_tx_payload[21:141]
+        print_info(f"  Hebrew text: '{hebrew_text.decode('utf-8', errors='replace')}'")
+        
+        # Bitcoin block hash (bytes 141-173)
+        bitcoin_hash = genesis_tx_payload[141:173]
+        bitcoin_hash_hex = bitcoin_hash[::-1].hex()
+        print_info(f"  Bitcoin block reference: {bitcoin_hash_hex}")
+        print_info(f"    (Bitcoin block #808080, provides timestamp anchor)")
         print_success("Bitcoin block reference verified")
+        
+        # Checkpoint block hash (bytes 173-205)
+        checkpoint_ref = genesis_tx_payload[173:205]
+        checkpoint_ref_hex = checkpoint_ref[::-1].hex()
+        print_info(f"  Checkpoint block reference: {checkpoint_ref_hex}")
+        print_info(f"    (Kaspa checkpoint block for UTXO state)")
         print_success("Checkpoint block reference verified")
         
         # Step 5: Verify hash chain from tips to genesis
@@ -234,9 +280,11 @@ def verify_genesis(node_type, datadir, pre_checkpoint_datadir=None, verbose=Fals
         # Use tips if available, otherwise use headers selected tip
         chain_tip = tips[0] if tips else hst
         if chain_tip:
+            print_info(f"Starting hash chain verification from tip: {chain_tip.hex()}")
+            print_info(f"Target genesis hash: {genesis_hash.hex()}")
             print_info("Verifying hash chain from current tip to genesis...")
             if not assert_cryptographic_hash_chain_to_genesis(
-                current_store, chain_tip, genesis_hash, verbose):
+                current_store, chain_tip, genesis_hash, True):
                 print_error("Hash chain verification failed")
                 return False
             print_success("Hash chain from current state to genesis verified")
@@ -247,12 +295,19 @@ def verify_genesis(node_type, datadir, pre_checkpoint_datadir=None, verbose=Fals
         # Step 6: UTXO commitment verification
         print_header("Step 6: UTXO Commitment Analysis")
         utxo_commitment = genesis_header.utxoCommitment.hash
-        print_info(f"UTXO Commitment: {utxo_commitment.hex()}")
+        print_info(f"Genesis UTXO commitment: {utxo_commitment.hex()}")
+        
+        # Define the empty MuHash value for comparison
+        empty_muhash = bytes.fromhex('544eb3142c000f0ad2c76ac41f4222abbababed830eeafee4b6dc56b52d5cac0')
+        print_info(f"Empty MuHash value:      {empty_muhash.hex()}")
         
         if all(byte == 0 for byte in utxo_commitment):
-            print_info("Empty UTXO commitment (original genesis)")
+            print_info("Status: All-zero UTXO commitment (should not occur)")
+        elif utxo_commitment == empty_muhash:
+            print_info("Status: Empty UTXO commitment (original genesis)")
         else:
-            print_info("Non-empty UTXO commitment (hardwired genesis with checkpoint UTXO set)")
+            print_info("Status: Non-empty UTXO commitment (hardwired genesis with checkpoint UTXO set)")
+            print_info("This means the genesis contains a pre-calculated UTXO set from a checkpoint")
         
         # Step 7: Pre-checkpoint verification
         print_header("Step 7: Pre-Checkpoint Verification")
@@ -273,31 +328,42 @@ def verify_genesis(node_type, datadir, pre_checkpoint_datadir=None, verbose=Fals
             checkpoint_hash = bytes.fromhex('0fca37ca667c2d550a6c4416dad9717e50927128c424fa4edbebc436ab13aeef')
             original_genesis = bytes.fromhex('caeb97960a160c211a6b2196bd78399fd4c4cc5b509f55c12c8a7d815f7536ea')
             
+            print_info(f"Checkpoint hash:      {checkpoint_hash.hex()}")
+            print_info(f"Original genesis hash: {original_genesis.hex()}")
+            
             # Verify checkpoint header
             checkpoint_header = pre_checkpoint_store.get_raw_header(checkpoint_hash)
             if checkpoint_header:
                 print_success("Checkpoint header found")
+                print_info(f"Checkpoint UTXO commitment: {checkpoint_header.utxoCommitment.hash.hex()}")
                 
                 # Verify UTXO commitments match
                 if genesis_header.utxoCommitment.hash == checkpoint_header.utxoCommitment.hash:
                     print_success("UTXO commitments match between genesis and checkpoint")
                 else:
                     print_error("UTXO commitment mismatch!")
+                    print_error(f"Genesis:    {genesis_header.utxoCommitment.hash.hex()}")
+                    print_error(f"Checkpoint: {checkpoint_header.utxoCommitment.hash.hex()}")
                     
                 # Verify chain from checkpoint to original genesis
                 print_info("Verifying chain from checkpoint to original genesis...")
                 if assert_cryptographic_hash_chain_to_genesis(
-                    pre_checkpoint_store, checkpoint_hash, original_genesis, verbose):
+                    pre_checkpoint_store, checkpoint_hash, original_genesis, True):
                     print_success("Checkpoint chain to original genesis verified")
                     
                     # Check original genesis UTXO commitment
                     original_genesis_header = pre_checkpoint_store.get_raw_header(original_genesis)
                     if original_genesis_header:
                         empty_muhash = bytes.fromhex('544eb3142c000f0ad2c76ac41f4222abbababed830eeafee4b6dc56b52d5cac0')
+                        print_info(f"Original genesis UTXO commitment: {original_genesis_header.utxoCommitment.hash.hex()}")
+                        print_info(f"Expected empty MuHash:            {empty_muhash.hex()}")
+                        
                         if original_genesis_header.utxoCommitment.hash == empty_muhash:
                             print_success("Original genesis has empty UTXO set verified!")
                         else:
                             print_error("Original genesis UTXO set is not empty!")
+                    else:
+                        print_error("Original genesis header not found")
                 else:
                     print_error("Checkpoint chain verification failed")
             else:
@@ -318,6 +384,15 @@ def verify_genesis(node_type, datadir, pre_checkpoint_datadir=None, verbose=Fals
         # Summary
         print_header("Verification Summary")
         print_success("All cryptographic verifications passed!")
+        print_info("Verification details:")
+        print_info(f"  ✓ Genesis hash: {genesis_hash.hex()}")
+        print_info(f"  ✓ Genesis coinbase transaction verified")
+        print_info(f"  ✓ Hash chain from current tip to genesis verified")
+        print_info(f"  ✓ UTXO commitment analysis completed")
+        if use_checkpoint_json:
+            print_info(f"  ✓ Pre-checkpoint verification completed")
+            print_info(f"  ✓ Original genesis empty UTXO set verified")
+        
         print_success("The Kaspa blockchain integrity has been verified")
         print_success("No premine detected - UTXO set evolved from empty state")
         

@@ -121,8 +121,3 @@ This verification provides cryptographic proof of Kaspa's integrity relying on:
 - **Platform Support:** Works on macOS, Linux, and Windows with platform-specific paths
 - **Google Colab Ready:** Complete instructions for cloud-based verification
 - **Comprehensive Testing:** Built-in database connectivity tests and troubleshooting guides
-
-## Authors
-
-- **Original Work:** Shai Wyborski, Michael Sutton
-- **Rust Node Support:** Luke Dunshea

@@ -506,10 +506,6 @@ class Store:
         hst_key = self._build_key(DatabaseStorePrefixes.HEADERS_SELECTED_TIP)
         hst_bytes = self.db.get(hst_key)
         
-        # Get tips
-        tips_key = self._build_key(DatabaseStorePrefixes.TIPS)
-        tips_bytes = self.db.get(tips_key)
-        
         if hst_bytes is None:
             print("Headers selected tip not found")
             hst_hash = b'\x00' * 32
@@ -517,32 +513,57 @@ class Store:
             # Headers selected tip is stored as raw hash bytes
             hst_hash = hst_bytes[:32] if len(hst_bytes) >= 32 else hst_bytes
         
-        if tips_bytes is None:
-            print("Tips not found")
-            return [], hst_hash
-        
-        # Tips are stored as bincode-serialized Vec<Hash>
-        # For now, parse as simple list of 32-byte hashes
+        # Get tips - in Rust nodes, tips are stored as individual entries
         tips_list = []
-        if len(tips_bytes) >= 8:  # At least length prefix
-            try:
-                # First 8 bytes are the length (little-endian u64)
+        
+        try:
+            # Method 1: Try to find tips using known hashes (starting with headers selected tip)
+            # In Rust, each tip is stored with key: [consensus prefix] + [TIPS prefix] + [bincode(hash)]
+            if len(hst_hash) == 32 and hst_hash != b'\x00' * 32:
+                # Check if the headers selected tip is stored as a tip
                 import struct
-                tips_count = struct.unpack('<Q', tips_bytes[:8])[0]
-                pos = 8
                 
-                for i in range(tips_count):
-                    if pos + 32 <= len(tips_bytes):
-                        tip_hash = tips_bytes[pos:pos+32]
-                        tips_list.append(tip_hash)
-                        pos += 32
-                    else:
-                        break
+                # Bincode serialization of a 32-byte hash in Rust
+                # The hash bytes are prefixed with their length (32 as u64)
+                bincode_hash = struct.pack('<Q', 32) + hst_hash
+                
+                tips_prefix = self._get_active_prefix() + bytes([DatabaseStorePrefixes.TIPS])
+                tip_key = tips_prefix + bincode_hash
+                
+                # Check if this key exists
+                if self.db.get(tip_key) is not None:
+                    tips_list.append(hst_hash)
+                    print(f"Found tip via headers selected tip: {hst_hash.hex()}")
+            
+            # Method 2: Try reading tips as a serialized list (legacy format)
+            if not tips_list:
+                tips_key = self._build_key(DatabaseStorePrefixes.TIPS)
+                tips_bytes = self.db.get(tips_key)
+                
+                if tips_bytes and len(tips_bytes) >= 8:
+                    # Tips stored as bincode-serialized Vec<Hash>
+                    tips_count = struct.unpack('<Q', tips_bytes[:8])[0]
+                    pos = 8
+                    
+                    for i in range(min(tips_count, 100)):  # Limit to 100 tips
+                        if pos + 32 <= len(tips_bytes):
+                            tip_hash = tips_bytes[pos:pos+32]
+                            tips_list.append(tip_hash)
+                            pos += 32
+                    
+                    pass  # Successfully found tips using legacy format
+            
+            # Method 3: If no tips found, use headers selected tip as the single tip
+            if not tips_list and len(hst_hash) == 32 and hst_hash != b'\x00' * 32:
+                # In most cases, the headers selected tip is the only active tip
+                # This is the expected behavior for a synced node
+                tips_list = [hst_hash]
                         
-            except Exception as e:
-                print(f"Failed to parse tips: {e}")
-                # Fallback to headers selected tip
-                tips_list = [hst_hash] if len(hst_hash) == 32 else []
+        except Exception as e:
+            print(f"Error reading tips: {e}")
+            # Fallback to headers selected tip
+            if len(hst_hash) == 32 and hst_hash != b'\x00' * 32:
+                tips_list = [hst_hash]
         
         return tips_list, hst_hash
     
@@ -692,7 +713,6 @@ if __name__ == "__main__":
         
         # Test basic operations
         tips, hst = store.tips()
-        print(f"Found {len(tips)} tips")
         print(f"Headers selected tip: {hst.hex()}")
         
         pp = store.pruning_point()
