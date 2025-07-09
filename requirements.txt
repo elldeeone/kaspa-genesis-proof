@@ -1,0 +1,7 @@
+# Dependencies for kaspa-genesis-proof verification
+# For Rust-based rusty-kaspa nodes
+numpy
+pandas
+rocksdict
+tqdm
+notebook
