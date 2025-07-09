@@ -46,11 +46,22 @@ pip install -r requirements.txt
 pip install numpy pandas plyvel protobuf==3.20.0 tqdm notebook
 ```
 
-### 3. Configure and Run
+### 3. Run Verification
+
+**Option A: Command-line script (recommended for quick verification)**
+```bash
+# For Rust nodes:
+python verify_kaspa_genesis.py --node-type rust --datadir ~/.rusty-kaspa/kaspa-mainnet/datadir
+
+# For Go nodes:
+python verify_kaspa_genesis.py --node-type go --datadir ~/.kaspad/kaspa-mainnet/datadir2
+```
+
+**Option B: Interactive notebook (recommended for detailed exploration)**
 ```bash
 # Edit genesis_proof.ipynb cell 2 to update your database path
 # Then run the verification:
-jupyter notebook genesis_proof.ipynb
+jupyter notebook verification/genesis_proof.ipynb
 ```
 
 **Common database paths:**
@@ -61,12 +72,14 @@ jupyter notebook genesis_proof.ipynb
 
 ```
 kaspa-genesis-proof/
+├── verify_kaspa_genesis.py        # Command-line verification script
 ├── verification/
-│   ├── genesis_proof.ipynb        # Main verification notebook (supports both node types)
+│   ├── genesis_proof.ipynb        # Interactive verification notebook
 │   ├── store_rust.py              # RocksDB + Bincode support for Rust nodes
 │   └── store.py                   # LevelDB + Protobuf support for Go nodes
 └── docs/
-    └── SETUP_GUIDE.md             # Detailed setup instructions
+    ├── SETUP_GUIDE.md             # Detailed setup instructions
+    └── TECHNICAL_NOTES.md         # Design decisions and implementation details
 ```
 
 ## Verification Process
@@ -103,7 +116,8 @@ This verification provides cryptographic proof of Kaspa's integrity relying on:
 
 - **Dual Node Support:** Works with both Go-based kaspad and Rust-based rusty-kaspa nodes
 - **Pure Python Implementation:** No external compilers or build tools required
-- **User-Friendly:** Clear configuration in notebook cell 2, comprehensive error messages
+- **Multiple Interfaces:** Command-line script for quick verification, Jupyter notebook for exploration
+- **User-Friendly:** Clear configuration and comprehensive error messages
 - **Platform Support:** Works on macOS, Linux, and Windows with platform-specific paths
 - **Google Colab Ready:** Complete instructions for cloud-based verification
 - **Comprehensive Testing:** Built-in database connectivity tests and troubleshooting guides

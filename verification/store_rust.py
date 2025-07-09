@@ -270,9 +270,22 @@ def deserialize_bincode_header(data):
         daa_score = struct.unpack('<Q', data[pos:pos+8])[0]
         pos += 8
         
-        # 11. blue_work: BlueWorkType (Uint192 = 24 bytes, little-endian)
-        blue_work = data[pos:pos+24]
+        # 11. blue_work: BlueWorkType (Uint192 = 24 bytes, little-endian in storage)
+        blue_work_bytes = data[pos:pos+24]
         pos += 24
+        
+        # Convert to big-endian and trim leading zeros for hashing compatibility
+        # This matches how Go handles BlueWork
+        blue_work_be = blue_work_bytes[::-1]  # Convert from little-endian to big-endian
+        # Find first non-zero byte
+        start = 0
+        for i, byte in enumerate(blue_work_be):
+            if byte != 0:
+                start = i
+                break
+        else:
+            start = len(blue_work_be)  # All zeros
+        blue_work = blue_work_be[start:] if start < len(blue_work_be) else b''
         
         # 12. blue_score: u64 (8 bytes, little-endian)
         blue_score = struct.unpack('<Q', data[pos:pos+8])[0]
@@ -424,7 +437,18 @@ class Store:
                         self.blueWork = header_data.blueWork
                         self.blueScore = header_data.blueScore
                         self.version = header_data.version
-                        self.parents = header_data.parents
+                        
+                        # Convert parents structure to match expected format
+                        # header_data.parents is a list of lists of hashes
+                        # We need to wrap them in objects with parentHashes and hash attributes
+                        self.parents = []
+                        for level_hashes in header_data.parents:
+                            level_obj = type('ParentLevel', (), {})()
+                            level_obj.parentHashes = []
+                            for parent_hash in level_hashes:
+                                parent_obj = type('ParentHash', (), {'hash': parent_hash})()
+                                level_obj.parentHashes.append(parent_obj)
+                            self.parents.append(level_obj)
                 
                 return ParsedHeader(header_data)
         except Exception as e:

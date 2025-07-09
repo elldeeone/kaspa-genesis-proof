@@ -148,6 +148,91 @@ Our verification testing covered:
 4. **Hash verification**: Do calculated hashes match expected values?
 5. **Complete workflow**: Does the entire notebook execute successfully?
 
+## Header Hash Verification Discovery
+
+### The Issue
+During final testing, we discovered that the standard header hash verification `assert(header_hash(genesis_header) == genesis_hash)` fails for Rust nodes but works for Go nodes.
+
+### Root Cause
+The issue was with how BlueWork is serialized differently between Go and Rust:
+
+**Go BlueWork Format:**
+- Stored as "trimmed big endian" - leading zeros are removed
+- Variable length encoding in hash calculation
+
+**Rust BlueWork Format:**
+- Stored as fixed 24-byte little-endian Uint192 in the database
+- Must be converted to trimmed big-endian for hash calculation
+
+Additionally, there's a storage format difference:
+
+**Go Storage Format:**
+- Headers are stored WITHOUT the hash as part of the data
+- Database key: `[prefix][hash]`
+- Database value: `[version][parents][merkle_root]...[pruning_point]`
+- Hash calculation: `blake2b(version + parents + ... + pruning_point) = expected_hash` ✓
+
+**Rust Storage Format:**
+- Headers are stored WITH the hash as the first field
+- Database key: `[prefix][hash]`
+- Database value: `[hash][version][parents][merkle_root]...[pruning_point]`
+- Hash calculation: `blake2b(version + parents + ... + pruning_point) ≠ stored_hash` ✗
+
+The Rust `Header` struct literally includes the hash as its first field:
+```rust
+pub struct Header {
+    pub hash: Hash,  // This is included in storage!
+    pub version: u16,
+    // ... other fields
+}
+```
+
+### Why This Happens
+- In Go, the hash is computed and used as a key, but not stored in the value
+- In Rust, the entire struct (including the hash field) is serialized to storage
+- When we deserialize, we get all fields including the stored hash
+- But the hash algorithm only hashes the "content" fields, not the hash itself
+
+### Solution Implemented
+We fixed the BlueWork deserialization in store_rust.py:
+
+```python
+# Convert little-endian storage format to big-endian
+blue_work_be = blue_work_bytes[::-1]
+# Trim leading zeros (matching Go's behavior)
+start = 0
+for i, byte in enumerate(blue_work_be):
+    if byte != 0:
+        start = i
+        break
+else:
+    start = len(blue_work_be)  # All zeros
+blue_work = blue_work_be[start:] if start < len(blue_work_be) else b''
+```
+
+With this fix, the standard hash verification now works for both Go and Rust nodes:
+```python
+assert(header_hash(genesis_header) == genesis_hash)  # Works for both!
+```
+
+### Why This Solution is Correct
+
+The fix ensures that:
+1. BlueWork is handled identically in both implementations for hash calculation
+2. The same cryptographic verification works for both node types
+3. No special cases or workarounds needed
+4. Full algorithmic verification is maintained
+
+### Lessons Learned
+1. **Serialization details matter**: BlueWork serialization was the key difference
+2. **Big-endian vs little-endian**: Rust stores as little-endian but hashes as big-endian
+3. **Trimming is important**: Leading zeros must be removed for hash compatibility
+4. **Ask the experts**: Special thanks to Michael Sutton for quickly identifying the BlueWork serialization issue
+5. **Test end-to-end early**: We tested components individually but missed the full verification flow
+
+### Acknowledgments
+Special shoutout to Michael for providing the crucial insight about BlueWork serialization differences between Go and Rust implementations. His guidance pointing to the specific code in `consensus/core/src/hashing/mod.rs` immediately solved what seemed like an intractable hash mismatch issue.
+
 ## Conclusion
 
-The pure Python implementation with manual bincode deserialization provides a robust, maintainable solution that works reliably with Rust nodes while maintaining the simplicity of the original verification process.
+The pure Python implementation with manual bincode deserialization provides a robust, maintainable solution that works reliably with Rust nodes while maintaining the simplicity of the original verification process. The header verification difference between Go and Rust nodes is handled transparently, ensuring users can verify the blockchain integrity regardless of which node implementation they use.
