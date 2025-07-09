@@ -8,7 +8,6 @@ try:
     ROCKSDB_AVAILABLE = True
 except ImportError:
     ROCKSDB_AVAILABLE = False
-    print("Warning: rocksdict not available. Using fallback approach.")
 
 # Try to import serialization packages
 try:
@@ -16,10 +15,6 @@ try:
     KASPA_PACKAGE_AVAILABLE = True
 except ImportError:
     KASPA_PACKAGE_AVAILABLE = False
-    print("Warning: kaspa package not available. Using fallback approach.")
-
-# Manual bincode deserialization - no external libraries needed
-print("Using manual bincode deserialization for complete compatibility")
 
 # Database prefixes from the Rust implementation
 # Based on database/src/registry.rs
@@ -357,7 +352,7 @@ class Store:
         self.print_freq = print_freq
         
         # Pure rocksdict implementation - no Rust extractor needed
-        print("Using pure rocksdict implementation with manual bincode deserialization")
+        # Using pure rocksdict implementation with manual bincode deserialization
     
     # Removed Rust extractor dependency - using pure rocksdict with manual bincode deserialization
     

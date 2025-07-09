@@ -254,11 +254,66 @@ def verify_genesis(node_type, datadir, pre_checkpoint_datadir=None, verbose=Fals
         else:
             print_info("Non-empty UTXO commitment (hardwired genesis with checkpoint UTXO set)")
         
-        # Optional: Pre-checkpoint verification
-        if pre_checkpoint_datadir:
-            print_header("Step 7: Pre-Checkpoint Verification")
+        # Step 7: Pre-checkpoint verification
+        print_header("Step 7: Pre-Checkpoint Verification")
+        
+        # Check if checkpoint data JSON is available
+        checkpoint_json_path = os.path.join(verification_dir, 'checkpoint_data.json')
+        use_checkpoint_json = os.path.exists(checkpoint_json_path)
+        
+        if use_checkpoint_json:
+            print_success("Found checkpoint_data.json - using optimized local data")
+            print_info("(No need to download the 1GB checkpoint database!)")
+            
+            # Import and use CheckpointStore
+            from store_checkpoint import CheckpointStore
+            pre_checkpoint_store = CheckpointStore(checkpoint_json_path)
+            
+            # Define checkpoint and original genesis hashes
+            checkpoint_hash = bytes.fromhex('0fca37ca667c2d550a6c4416dad9717e50927128c424fa4edbebc436ab13aeef')
+            original_genesis = bytes.fromhex('caeb97960a160c211a6b2196bd78399fd4c4cc5b509f55c12c8a7d815f7536ea')
+            
+            # Verify checkpoint header
+            checkpoint_header = pre_checkpoint_store.get_raw_header(checkpoint_hash)
+            if checkpoint_header:
+                print_success("Checkpoint header found")
+                
+                # Verify UTXO commitments match
+                if genesis_header.utxoCommitment.hash == checkpoint_header.utxoCommitment.hash:
+                    print_success("UTXO commitments match between genesis and checkpoint")
+                else:
+                    print_error("UTXO commitment mismatch!")
+                    
+                # Verify chain from checkpoint to original genesis
+                print_info("Verifying chain from checkpoint to original genesis...")
+                if assert_cryptographic_hash_chain_to_genesis(
+                    pre_checkpoint_store, checkpoint_hash, original_genesis, verbose):
+                    print_success("Checkpoint chain to original genesis verified")
+                    
+                    # Check original genesis UTXO commitment
+                    original_genesis_header = pre_checkpoint_store.get_raw_header(original_genesis)
+                    if original_genesis_header:
+                        empty_muhash = bytes.fromhex('544eb3142c000f0ad2c76ac41f4222abbababed830eeafee4b6dc56b52d5cac0')
+                        if original_genesis_header.utxoCommitment.hash == empty_muhash:
+                            print_success("Original genesis has empty UTXO set verified!")
+                        else:
+                            print_error("Original genesis UTXO set is not empty!")
+                else:
+                    print_error("Checkpoint chain verification failed")
+            else:
+                print_error("Checkpoint header not found in data")
+                
+            pre_checkpoint_store.close()
+            
+        elif pre_checkpoint_datadir:
+            print_info("Using full pre-checkpoint database...")
+            # Original code for full database
             print_info("This would verify the chain from checkpoint to original genesis")
             print_info("Requires pre-checkpoint database snapshot")
+        else:
+            print_info("Pre-checkpoint verification skipped")
+            print_info("To enable: Place checkpoint_data.json in verification folder")
+            print_info("Or provide --pre-checkpoint-datadir with full database")
         
         # Summary
         print_header("Verification Summary")
