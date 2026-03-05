@@ -36,7 +36,7 @@ rust-native-verifier
 
 By default it auto-detects both node type and datadir path.
 It also prints a sync advisory: if your node is still syncing, it asks whether to continue verifying your latest local synced tip now (you can rerun after full sync for current-tip verification).
-At the end of the run it asks whether to export a JSON report, and writes one automatically if you choose `yes`.
+At the end of the run it asks whether to export a JSON report, and writes one automatically if you choose `yes` (including a full run transcript and structured details).
 
 ### 2. Install Dependencies
 

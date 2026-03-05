@@ -10,6 +10,7 @@ use std::env;
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod proto {
@@ -37,6 +38,7 @@ const HARDWIRED_GENESIS_TX_PAYLOAD_HEX: &str = "000000000000000000e1f50500000000
 
 const CHECKPOINT_DATA_JSON: &str = include_str!("../../verification/checkpoint_data.json");
 const TIP_SYNC_WARNING_THRESHOLD_MS: u64 = 10 * 60 * 1000;
+static OUTPUT_CAPTURE: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
 type Hash32 = [u8; 32];
 
@@ -193,6 +195,9 @@ struct VerificationReport {
     aborted_due_to_sync_warning: bool,
     genesis_mode: Option<String>,
     active_genesis_hash: Option<String>,
+    chain_tip_used: Option<String>,
+    tips: Vec<String>,
+    screen_output_lines: Vec<String>,
     error: Option<String>,
 }
 
@@ -295,25 +300,67 @@ struct CheckpointHeaderJson {
 }
 
 fn print_header(text: &str) {
-    println!("\n{BOLD}{BLUE}{}{END}", "=".repeat(60));
+    let sep = "=".repeat(60);
+    println!("\n{BOLD}{BLUE}{sep}{END}");
     println!("{BOLD}{BLUE}{text}{END}");
-    println!("{BOLD}{BLUE}{}{END}", "=".repeat(60));
+    println!("{BOLD}{BLUE}{sep}{END}");
+    capture_output_line("");
+    capture_output_line(&sep);
+    capture_output_line(text);
+    capture_output_line(&sep);
 }
 
 fn print_success(text: &str) {
     println!("{GREEN}✓ {text}{END}");
+    capture_output_line(&format!("✓ {text}"));
 }
 
 fn print_error(text: &str) {
     println!("{RED}✗ {text}{END}");
+    capture_output_line(&format!("✗ {text}"));
 }
 
 fn print_info(text: &str) {
     println!("{GREEN}→ {text}{END}");
+    capture_output_line(&format!("→ {text}"));
 }
 
 fn print_warning(text: &str) {
     println!("{YELLOW}! {text}{END}");
+    capture_output_line(&format!("! {text}"));
+}
+
+fn print_plain(text: &str) {
+    println!("{text}");
+    capture_output_line(text);
+}
+
+fn print_prompt(text: &str) {
+    println!("{YELLOW}? {text}{END}");
+    capture_output_line(&format!("? {text}"));
+}
+
+fn output_capture() -> &'static Mutex<Vec<String>> {
+    OUTPUT_CAPTURE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn clear_output_capture() {
+    if let Ok(mut lines) = output_capture().lock() {
+        lines.clear();
+    }
+}
+
+fn capture_output_line(line: &str) {
+    if let Ok(mut lines) = output_capture().lock() {
+        lines.push(line.to_string());
+    }
+}
+
+fn output_capture_snapshot() -> Vec<String> {
+    output_capture()
+        .lock()
+        .map(|lines| lines.clone())
+        .unwrap_or_default()
 }
 
 fn now_millis() -> Result<u64> {
@@ -377,7 +424,7 @@ fn prompt_export_json_decision(no_input: bool) -> Result<bool> {
         return Ok(false);
     }
 
-    println!("{YELLOW}? Do you want to export this verification to JSON? [y/N]{END}");
+    print_prompt("Do you want to export this verification to JSON? [y/N]");
     let mut input = String::new();
     io::stdin()
         .read_line(&mut input)
@@ -400,9 +447,7 @@ fn prompt_continue_on_sync_warning(no_input: bool) -> Result<bool> {
         return Ok(true);
     }
 
-    println!(
-        "{YELLOW}? Continue verification anyway against your latest local synced tip? [y/N]{END}"
-    );
+    print_prompt("Continue verification anyway against your latest local synced tip? [y/N]");
     let mut input = String::new();
     io::stdin()
         .read_line(&mut input)
@@ -1581,6 +1626,7 @@ fn verify_genesis(
     print_info(&format!("Headers selected tip: {}", hex_of(&hst)));
     report.tips_count = Some(tips.len());
     report.headers_selected_tip = Some(hex_of(&hst));
+    report.tips = tips.iter().map(hex_of).collect();
 
     if let Some(hst_header) = store.get_raw_header(&hst)? {
         let tip_ts = hst_header.time_in_milliseconds;
@@ -1739,6 +1785,7 @@ fn verify_genesis(
 
     print_header("Step 5: Hash Chain Verification");
     let chain_tip = if !tips.is_empty() { tips[0] } else { hst };
+    report.chain_tip_used = Some(hex_of(&chain_tip));
     if chain_tip == [0u8; 32] {
         print_error("No valid chain tip found to verify");
         report.error = Some("no valid chain tip found to verify".to_string());
@@ -1896,21 +1943,25 @@ fn verify_genesis(
     print_success("The Kaspa blockchain integrity has been verified");
     print_success("No premine detected - UTXO set evolved from empty state");
     println!("\n{BOLD}Thank you for verifying the integrity of Kaspa!{END}");
+    capture_output_line("");
+    capture_output_line("Thank you for verifying the integrity of Kaspa!");
 
     Ok(true)
 }
 
 fn main() {
+    clear_output_capture();
     let cli = Cli::parse();
     let mut report = build_initial_report(&cli);
 
     println!("{BOLD}Kaspa Genesis Proof Verification (Rust-Native){END}");
-    println!("Requested node type: {:?}", cli.node_type);
+    capture_output_line("Kaspa Genesis Proof Verification (Rust-Native)");
+    print_plain(&format!("Requested node type: {:?}", cli.node_type));
 
     if let Some(datadir) = cli.datadir.as_deref() {
-        println!("Input data directory: {}", datadir.display());
+        print_plain(&format!("Input data directory: {}", datadir.display()));
     } else {
-        println!("Input data directory: auto-detect (OS default Kaspa locations)");
+        print_plain("Input data directory: auto-detect (OS default Kaspa locations)");
     }
 
     let mut exit_code = match run(&cli, &mut report) {
@@ -1932,6 +1983,7 @@ fn main() {
                 "kaspa-proof-report-{}.json",
                 now_millis().unwrap_or(0)
             ));
+            report.screen_output_lines = output_capture_snapshot();
             match write_json_report(&json_out, &report) {
                 Ok(_) => print_info(&format!("JSON report written to {}", json_out.display())),
                 Err(err) => {
@@ -1948,7 +2000,8 @@ fn main() {
     }
 
     if cli.pause_on_exit {
-        println!("\nPress Enter to exit...");
+        print_plain("");
+        print_plain("Press Enter to exit...");
         let mut line = String::new();
         let _ = io::stdin().read_line(&mut line);
     }
