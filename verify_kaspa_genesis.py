@@ -461,15 +461,32 @@ Examples:
         print_error(f"Data directory not found: {datadir}")
         sys.exit(1)
     
-    # For Rust nodes, append the consensus subdirectory
-    if args.node_type == 'rust' and not datadir.endswith('consensus-003'):
-        consensus_dir = os.path.join(datadir, 'consensus', 'consensus-003')
-        if os.path.exists(consensus_dir):
-            datadir = consensus_dir
-        else:
-            print_error(f"Consensus directory not found: {consensus_dir}")
-            print_info("Make sure your Rust node is fully synced")
-            sys.exit(1)
+    # For Rust nodes, resolve consensus-* dynamically (not fixed to consensus-003)
+    if args.node_type == 'rust':
+        datadir_path = Path(datadir)
+        if not datadir_path.name.startswith('consensus-'):
+            consensus_root = datadir_path / 'consensus'
+            if consensus_root.is_dir():
+                consensus_dirs = [
+                    p for p in consensus_root.iterdir()
+                    if p.is_dir() and p.name.startswith('consensus-')
+                ]
+
+                def consensus_sort_key(path_obj):
+                    suffix = path_obj.name.split('consensus-', 1)[-1]
+                    try:
+                        return int(suffix)
+                    except ValueError:
+                        return -1
+
+                consensus_dirs.sort(key=consensus_sort_key)
+                if consensus_dirs:
+                    datadir = str(consensus_dirs[-1])
+                    print_info(f"Auto-resolved Rust consensus directory: {datadir}")
+                else:
+                    print_error(f"No consensus-* directories found in: {consensus_root}")
+                    print_info("Make sure your Rust node has started and initialized consensus data")
+                    sys.exit(1)
     
     print(f"{Colors.BOLD}Kaspa Genesis Proof Verification{Colors.END}")
     print(f"Node type: {args.node_type}")

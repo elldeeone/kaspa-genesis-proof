@@ -100,7 +100,7 @@ Our parsing approach:
 ### Initial Confusion
 The Rust implementation uses different key formatting than we expected. Through debugging, we discovered:
 
-1. **Direct consensus databases** (consensus-003) use simple prefix format
+1. **Direct consensus databases** (`consensus-*`) use simple prefix format
 2. **No consensus prefix needed** for direct database access
 3. **Key format**: `[prefix_byte] + [hash_bytes]` (no separators)
 

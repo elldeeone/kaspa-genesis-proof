@@ -5,7 +5,7 @@
 ### For Rust-based rusty-kaspa nodes (Recommended):
 - **Fully synced rusty-kaspa node**
 - **Python 3.8+**
-- **Node data location**: `~/.rusty-kaspa/kaspa-mainnet/datadir/consensus/consensus-003`
+- **Node data location**: `~/.rusty-kaspa/kaspa-mainnet/datadir` (active `consensus-*` is resolved automatically)
 
 ### For Go-based kaspad nodes (Legacy):
 - **Fully synced kaspad node**
@@ -19,6 +19,22 @@
 git clone https://github.com/elldeeone/kaspa-genesis-proof
 cd kaspa-genesis-proof
 ```
+
+### 1A. Rust-native executable path (no Python required)
+
+If you want a standalone executable workflow, use the prebuilt release artifacts.
+
+- Download the OS-matching artifact from GitHub Releases.
+- Run:
+  - `run-verifier.bat` on Windows
+  - `./run-verifier.sh` on macOS/Linux
+- Or run the binary directly:
+
+```bash
+rust-native-verifier
+```
+
+By default it auto-detects both node type and datadir path.
 
 ### 2. Install Dependencies
 
@@ -62,9 +78,9 @@ jupyter notebook verification/genesis_proof.ipynb
 
 | Platform | Rust Node Path | Go Node Path |
 |----------|---------------|--------------|
-| **macOS** | `~/.rusty-kaspa/kaspa-mainnet/datadir/consensus/consensus-003` | `~/.kaspad/kaspa-mainnet/datadir2` |
-| **Linux** | `~/.rusty-kaspa/kaspa-mainnet/datadir/consensus/consensus-003` | `~/.kaspad/kaspa-mainnet/datadir2` |
-| **Windows** | `%APPDATA%\.rusty-kaspa\kaspa-mainnet\datadir\consensus\consensus-003` | `%APPDATA%\.kaspad\kaspa-mainnet\datadir2` |
+| **macOS** | `~/.rusty-kaspa/kaspa-mainnet/datadir` | `~/.kaspad/kaspa-mainnet/datadir2` |
+| **Linux** | `~/.rusty-kaspa/kaspa-mainnet/datadir` | `~/.kaspad/kaspa-mainnet/datadir2` |
+| **Windows** | `%APPDATA%\.rusty-kaspa\kaspa-mainnet\datadir` | `%APPDATA%\.kaspad\kaspa-mainnet\datadir2` |
 
 **Note:** The verification script will automatically detect the consensus database directory within your datadir.
 
@@ -73,7 +89,7 @@ jupyter notebook verification/genesis_proof.ipynb
 ### Database Path Issues
 - **Error**: `Database connectivity test failed`
 - **Solution**: Verify your database path exists and contains data
-- **Check**: Run `ls -la ~/.rusty-kaspa/kaspa-mainnet/datadir/consensus/consensus-003` (or equivalent path)
+- **Check**: Run `ls -la ~/.rusty-kaspa/kaspa-mainnet/datadir` (or equivalent path)
 
 ### Python RocksDB Issues
 - **Error**: `rocksdict not available`

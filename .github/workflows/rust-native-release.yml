@@ -1,0 +1,107 @@
+name: rust-native-verifier-release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "rust-native-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact_suffix }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_suffix: linux-x86_64
+            binary_name: rust-native-verifier
+            archive_ext: tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact_suffix: macos-x86_64
+            binary_name: rust-native-verifier
+            archive_ext: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact_suffix: macos-aarch64
+            binary_name: rust-native-verifier
+            archive_ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_suffix: windows-x86_64
+            binary_name: rust-native-verifier.exe
+            archive_ext: zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --locked --release --manifest-path rust-native-verifier/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG_DIR="kaspa-genesis-proof-rust-native-${{ matrix.artifact_suffix }}"
+          mkdir -p "$PKG_DIR"
+
+          cp "rust-native-verifier/target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "$PKG_DIR/"
+          cp "rust-native-verifier/dist/run-verifier.sh" "$PKG_DIR/"
+          cp "rust-native-verifier/dist/README-RUN.txt" "$PKG_DIR/"
+
+          chmod +x "$PKG_DIR/rust-native-verifier"
+          chmod +x "$PKG_DIR/run-verifier.sh"
+
+          tar -czf "${PKG_DIR}.tar.gz" "$PKG_DIR"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $pkgDir = "kaspa-genesis-proof-rust-native-${{ matrix.artifact_suffix }}"
+          New-Item -ItemType Directory -Path $pkgDir | Out-Null
+
+          Copy-Item "rust-native-verifier/target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "$pkgDir/"
+          Copy-Item "rust-native-verifier/dist/run-verifier.bat" "$pkgDir/"
+          Copy-Item "rust-native-verifier/dist/README-RUN.txt" "$pkgDir/"
+
+          Compress-Archive -Path "$pkgDir/*" -DestinationPath "$pkgDir.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-native-verifier-${{ matrix.artifact_suffix }}
+          path: kaspa-genesis-proof-rust-native-${{ matrix.artifact_suffix }}.${{ matrix.archive_ext }}
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+          generate_release_notes: true
