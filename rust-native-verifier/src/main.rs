@@ -10,6 +10,7 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/serialization.rs"));
@@ -17,6 +18,7 @@ pub mod proto {
 
 const GREEN: &str = "\x1b[92m";
 const RED: &str = "\x1b[91m";
+const YELLOW: &str = "\x1b[93m";
 const BLUE: &str = "\x1b[94m";
 const BOLD: &str = "\x1b[1m";
 const END: &str = "\x1b[0m";
@@ -34,6 +36,7 @@ const MAINNET_SUBNETWORK_ID_COINBASE_HEX: &str = "010000000000000000000000000000
 const HARDWIRED_GENESIS_TX_PAYLOAD_HEX: &str = "000000000000000000e1f5050000000000000100d795d79ed79420d793d79920d7a2d79cd799d79a20d795d7a2d79c20d790d797d799d79a20d799d799d798d79120d791d7a9d790d7a820d79bd7a1d7a4d79020d795d793d794d791d79420d79cd79ed7a2d791d79320d79bd7a8d7a2d795d7aa20d790d79cd794d79bd79d20d7aad7a2d791d793d795d79f0000000000000000000b1f8e1c17b0133d439174e52efbb0c41c3583a8aa66b00fca37ca667c2d550a6c4416dad9717e50927128c424fa4edbebc436ab13aeef";
 
 const CHECKPOINT_DATA_JSON: &str = include_str!("../../verification/checkpoint_data.json");
+const TIP_SYNC_WARNING_THRESHOLD_MS: u64 = 10 * 60 * 1000;
 
 type Hash32 = [u8; 32];
 
@@ -280,6 +283,35 @@ fn print_error(text: &str) {
 
 fn print_info(text: &str) {
     println!("{GREEN}→ {text}{END}");
+}
+
+fn print_warning(text: &str) {
+    println!("{YELLOW}! {text}{END}");
+}
+
+fn now_millis() -> Result<u64> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock appears to be before Unix epoch")?;
+    u64::try_from(now.as_millis()).context("current time millis does not fit in u64")
+}
+
+fn format_duration_ms(ms: u64) -> String {
+    let total_seconds = ms / 1000;
+    let days = total_seconds / 86_400;
+    let hours = (total_seconds % 86_400) / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+
+    if days > 0 {
+        format!("{days}d {hours}h {minutes}m {seconds}s")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m {seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 fn to_hash32(bytes: &[u8]) -> Result<Hash32> {
@@ -1444,6 +1476,38 @@ fn verify_genesis(
     let (tips, hst) = store.tips()?;
     print_info(&format!("Number of DAG tips: {}", tips.len()));
     print_info(&format!("Headers selected tip: {}", hex_of(&hst)));
+
+    if let Some(hst_header) = store.get_raw_header(&hst)? {
+        let tip_ts = hst_header.time_in_milliseconds;
+        print_info(&format!("Headers selected tip timestamp: {tip_ts} ms"));
+
+        let now = now_millis()?;
+        if now >= tip_ts {
+            let lag = now - tip_ts;
+            print_info(&format!(
+                "Tip age vs local clock: {}",
+                format_duration_ms(lag)
+            ));
+
+            if lag > TIP_SYNC_WARNING_THRESHOLD_MS {
+                print_warning(
+                    "Node appears to still be syncing or is behind the network tip. This proof is valid for your current local tip; rerun after sync completes for latest-state verification.",
+                );
+            } else {
+                print_success("Tip time is close to local clock (likely near latest network tip)");
+            }
+        } else {
+            let lead = tip_ts - now;
+            print_warning(&format!(
+                "Tip timestamp is {} ahead of local clock. Check system time.",
+                format_duration_ms(lead)
+            ));
+        }
+    } else {
+        print_warning(
+            "Could not read selected-tip header timestamp, so sync status advisory is unavailable.",
+        );
+    }
 
     print_header("Step 3: Genesis Header Verification");
 
