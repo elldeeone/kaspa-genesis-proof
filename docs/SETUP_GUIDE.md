@@ -35,7 +35,7 @@ rust-native-verifier
 ```
 
 By default it auto-detects both node type and datadir path.
-It also prints a sync advisory: if your node is still syncing, the proof remains valid for your latest local synced tip, and you can rerun after full sync for current-tip verification.
+It also prints a sync advisory: if your node is still syncing, it asks whether to continue verifying your latest local synced tip now (you can rerun after full sync for current-tip verification).
 
 ### 2. Install Dependencies
 

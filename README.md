@@ -58,13 +58,16 @@ cargo build --release
 
 # Keep terminal open after completion (useful for double-click style launches)
 ./target/release/rust-native-verifier --pause-on-exit
+
+# Non-interactive mode (skip sync warning prompt and continue automatically)
+./target/release/rust-native-verifier --no-input
 ```
 
 ### Notes
 - The Rust CLI keeps the verification process visible step-by-step (same style as the Python flow).
 - If `--datadir` is not supplied, the verifier probes standard Kaspa datadir locations for macOS/Linux/Windows.
 - It supports Rust DB layouts with active `consensus-*` resolution and legacy Go LevelDB layouts.
-- It prints a sync advisory based on selected-tip timestamp. If your node is still in IBD, verification still proves integrity for your latest local synced tip.
+- It prints a sync advisory based on selected-tip timestamp and asks whether to continue when the node appears behind.
 - Embedded checkpoint data is included in the verifier path, so you do not need the 1GB pre-checkpoint database.
 
 ### 1. Clone and Setup

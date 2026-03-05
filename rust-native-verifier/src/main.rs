@@ -8,7 +8,7 @@ use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -69,6 +69,12 @@ struct Cli {
 
     #[arg(long, short = 'v', help = "Enable verbose chain-walk output")]
     verbose: bool,
+
+    #[arg(
+        long,
+        help = "Disable interactive prompts and continue automatically when sync advisory is triggered"
+    )]
+    no_input: bool,
 
     #[arg(
         long,
@@ -312,6 +318,31 @@ fn format_duration_ms(ms: u64) -> String {
     } else {
         format!("{seconds}s")
     }
+}
+
+fn prompt_continue_on_sync_warning(no_input: bool) -> Result<bool> {
+    if no_input {
+        print_warning("Sync advisory prompt skipped due to --no-input; continuing automatically.");
+        return Ok(true);
+    }
+
+    if !io::stdin().is_terminal() {
+        print_warning(
+            "Sync advisory prompt skipped because stdin is non-interactive; continuing automatically.",
+        );
+        return Ok(true);
+    }
+
+    println!(
+        "{YELLOW}? Continue verification anyway against your latest local synced tip? [y/N]{END}"
+    );
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .context("failed reading prompt response from stdin")?;
+
+    let response = input.trim().to_ascii_lowercase();
+    Ok(matches!(response.as_str(), "y" | "yes"))
 }
 
 fn to_hash32(bytes: &[u8]) -> Result<Hash32> {
@@ -1451,6 +1482,7 @@ fn verify_genesis(
     probe_notes: &[String],
     pre_checkpoint_datadir: Option<&Path>,
     verbose: bool,
+    no_input: bool,
 ) -> Result<bool> {
     let hardwired_genesis = hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX)?;
     let original_genesis = hash32_from_hex(ORIGINAL_GENESIS_HASH_HEX)?;
@@ -1493,6 +1525,11 @@ fn verify_genesis(
                 print_warning(
                     "Node appears to still be syncing or is behind the network tip. This proof is valid for your current local tip; rerun after sync completes for latest-state verification.",
                 );
+                if !prompt_continue_on_sync_warning(no_input)? {
+                    print_error("Verification aborted by user due to sync advisory.");
+                    return Ok(false);
+                }
+                print_info("Continuing verification against latest local synced tip.");
             } else {
                 print_success("Tip time is close to local clock (likely near latest network tip)");
             }
@@ -1810,5 +1847,6 @@ fn run(cli: &Cli) -> Result<bool> {
         &probe_notes,
         cli.pre_checkpoint_datadir.as_deref(),
         cli.verbose,
+        cli.no_input,
     )
 }
