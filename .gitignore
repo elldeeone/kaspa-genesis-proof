@@ -1,40 +1,6 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-venv/
-ENV/
-env/
-.venv
-kaspa-genesis-env/
-
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb_checkpoints
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
+/target
+kaspa-proof-report-*.json
 .DS_Store
-Thumbs.db
-
-# Test files
-test_*.py
-*.test
-
-# Temporary files
-*.tmp
-*.temp
-*.log
-
-# Database files
-*.db
-*.sst
-*.log
+kaspa-genesis-env/
+.venv/
+venv/

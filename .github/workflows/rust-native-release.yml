@@ -48,7 +48,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --locked --release --manifest-path rust-native-verifier/Cargo.toml --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
@@ -58,9 +58,9 @@ jobs:
           PKG_DIR="kaspa-genesis-proof-rust-native-${{ matrix.artifact_suffix }}"
           mkdir -p "$PKG_DIR"
 
-          cp "rust-native-verifier/target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "$PKG_DIR/"
-          cp "rust-native-verifier/dist/run-verifier.sh" "$PKG_DIR/"
-          cp "rust-native-verifier/dist/README-RUN.txt" "$PKG_DIR/"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "$PKG_DIR/"
+          cp "dist/run-verifier.sh" "$PKG_DIR/"
+          cp "dist/README-RUN.txt" "$PKG_DIR/"
 
           chmod +x "$PKG_DIR/rust-native-verifier"
           chmod +x "$PKG_DIR/run-verifier.sh"
@@ -74,9 +74,9 @@ jobs:
           $pkgDir = "kaspa-genesis-proof-rust-native-${{ matrix.artifact_suffix }}"
           New-Item -ItemType Directory -Path $pkgDir | Out-Null
 
-          Copy-Item "rust-native-verifier/target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "$pkgDir/"
-          Copy-Item "rust-native-verifier/dist/run-verifier.bat" "$pkgDir/"
-          Copy-Item "rust-native-verifier/dist/README-RUN.txt" "$pkgDir/"
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "$pkgDir/"
+          Copy-Item "dist/run-verifier.bat" "$pkgDir/"
+          Copy-Item "dist/README-RUN.txt" "$pkgDir/"
 
           Compress-Archive -Path "$pkgDir/*" -DestinationPath "$pkgDir.zip"
 
