@@ -424,7 +424,7 @@ fn prompt_export_json_decision(no_input: bool) -> Result<bool> {
         return Ok(false);
     }
 
-    print_prompt("Do you want to export this verification to JSON? [y/N]");
+    println!("{YELLOW}? Do you want to export this verification to JSON? [y/N]{END}");
     let mut input = String::new();
     io::stdin()
         .read_line(&mut input)
