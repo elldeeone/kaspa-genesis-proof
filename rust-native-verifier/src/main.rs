@@ -72,12 +72,6 @@ struct Cli {
 
     #[arg(
         long,
-        help = "Write a JSON verification report to the specified file path"
-    )]
-    json_out: Option<PathBuf>,
-
-    #[arg(
-        long,
         help = "Disable interactive prompts and continue automatically when sync advisory is triggered"
     )]
     no_input: bool,
@@ -376,6 +370,21 @@ fn write_json_report(path: &Path, report: &VerificationReport) -> Result<()> {
     let json = serde_json::to_string_pretty(report).context("failed serializing JSON report")?;
     fs::write(path, json)
         .with_context(|| format!("failed writing JSON report file {}", path.display()))
+}
+
+fn prompt_export_json_decision(no_input: bool) -> Result<bool> {
+    if no_input || !io::stdin().is_terminal() {
+        return Ok(false);
+    }
+
+    println!("{YELLOW}? Do you want to export this verification to JSON? [y/N]{END}");
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .context("failed reading export prompt response from stdin")?;
+
+    let response = input.trim().to_ascii_lowercase();
+    Ok(matches!(response.as_str(), "y" | "yes"))
 }
 
 fn prompt_continue_on_sync_warning(no_input: bool) -> Result<bool> {
@@ -1917,15 +1926,26 @@ fn main() {
         }
     };
 
-    if let Some(json_out) = cli.json_out.as_deref() {
-        match write_json_report(json_out, &report) {
-            Ok(_) => print_info(&format!("JSON report written to {}", json_out.display())),
-            Err(err) => {
-                print_error(&format!("Failed writing JSON report: {err}"));
-                exit_code = 1;
+    match prompt_export_json_decision(cli.no_input) {
+        Ok(true) => {
+            let json_out = PathBuf::from(format!(
+                "kaspa-proof-report-{}.json",
+                now_millis().unwrap_or(0)
+            ));
+            match write_json_report(&json_out, &report) {
+                Ok(_) => print_info(&format!("JSON report written to {}", json_out.display())),
+                Err(err) => {
+                    print_error(&format!("Failed writing JSON report: {err}"));
+                    exit_code = 1;
+                }
             }
         }
-    };
+        Ok(false) => {}
+        Err(err) => {
+            print_error(&format!("Failed during export prompt: {err}"));
+            exit_code = 1;
+        }
+    }
 
     if cli.pause_on_exit {
         println!("\nPress Enter to exit...");
