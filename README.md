@@ -61,6 +61,9 @@ cargo build --release
 
 # Non-interactive mode (skip sync warning prompt and continue automatically)
 ./target/release/rust-native-verifier --no-input
+
+# Save machine-readable result summary
+./target/release/rust-native-verifier --no-input --json-out ./verification-result.json
 ```
 
 ### Notes

@@ -4,7 +4,7 @@ use clap::{Parser, ValueEnum};
 use prost::Message;
 use rocksdb::{DB as RocksDb, Direction, IteratorMode, Options as RocksOptions};
 use rusty_leveldb::{DB as LevelDb, Options as LevelOptions};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs;
@@ -69,6 +69,12 @@ struct Cli {
 
     #[arg(long, short = 'v', help = "Enable verbose chain-walk output")]
     verbose: bool,
+
+    #[arg(
+        long,
+        help = "Write a JSON verification report to the specified file path"
+    )]
+    json_out: Option<PathBuf>,
 
     #[arg(
         long,
@@ -173,6 +179,27 @@ struct OpenStoreResult {
     store: Box<dyn HeaderStore>,
     input_path: PathBuf,
     probe_notes: Vec<String>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct VerificationReport {
+    generated_at_unix_ms: u64,
+    success: bool,
+    requested_node_type: String,
+    provided_datadir: Option<String>,
+    resolved_input_path: Option<String>,
+    resolved_db_path: Option<String>,
+    store_type: Option<String>,
+    tips_count: Option<usize>,
+    headers_selected_tip: Option<String>,
+    headers_selected_tip_timestamp_ms: Option<u64>,
+    tip_age_ms: Option<u64>,
+    sync_warning_triggered: bool,
+    continued_after_sync_warning: Option<bool>,
+    aborted_due_to_sync_warning: bool,
+    genesis_mode: Option<String>,
+    active_genesis_hash: Option<String>,
+    error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -318,6 +345,37 @@ fn format_duration_ms(ms: u64) -> String {
     } else {
         format!("{seconds}s")
     }
+}
+
+fn cli_node_type_label(node_type: CliNodeType) -> &'static str {
+    match node_type {
+        CliNodeType::Auto => "auto",
+        CliNodeType::Rust => "rust",
+        CliNodeType::Go => "go",
+    }
+}
+
+fn build_initial_report(cli: &Cli) -> VerificationReport {
+    VerificationReport {
+        generated_at_unix_ms: now_millis().unwrap_or(0),
+        requested_node_type: cli_node_type_label(cli.node_type).to_string(),
+        provided_datadir: cli.datadir.as_ref().map(|p| p.display().to_string()),
+        ..VerificationReport::default()
+    }
+}
+
+fn write_json_report(path: &Path, report: &VerificationReport) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed creating report parent dir {}", parent.display())
+            })?;
+        }
+    }
+
+    let json = serde_json::to_string_pretty(report).context("failed serializing JSON report")?;
+    fs::write(path, json)
+        .with_context(|| format!("failed writing JSON report file {}", path.display()))
 }
 
 fn prompt_continue_on_sync_warning(no_input: bool) -> Result<bool> {
@@ -1483,6 +1541,7 @@ fn verify_genesis(
     pre_checkpoint_datadir: Option<&Path>,
     verbose: bool,
     no_input: bool,
+    report: &mut VerificationReport,
 ) -> Result<bool> {
     let hardwired_genesis = hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX)?;
     let original_genesis = hash32_from_hex(ORIGINAL_GENESIS_HASH_HEX)?;
@@ -1503,15 +1562,21 @@ fn verify_genesis(
     for note in store.resolution_notes() {
         print_info(note);
     }
+    report.store_type = Some(store.store_name().to_string());
+    report.resolved_input_path = Some(input_path.display().to_string());
+    report.resolved_db_path = Some(store.resolved_db_path().display().to_string());
 
     print_header("Step 2: Current Chain State");
     let (tips, hst) = store.tips()?;
     print_info(&format!("Number of DAG tips: {}", tips.len()));
     print_info(&format!("Headers selected tip: {}", hex_of(&hst)));
+    report.tips_count = Some(tips.len());
+    report.headers_selected_tip = Some(hex_of(&hst));
 
     if let Some(hst_header) = store.get_raw_header(&hst)? {
         let tip_ts = hst_header.time_in_milliseconds;
         print_info(&format!("Headers selected tip timestamp: {tip_ts} ms"));
+        report.headers_selected_tip_timestamp_ms = Some(tip_ts);
 
         let now = now_millis()?;
         if now >= tip_ts {
@@ -1520,13 +1585,19 @@ fn verify_genesis(
                 "Tip age vs local clock: {}",
                 format_duration_ms(lag)
             ));
+            report.tip_age_ms = Some(lag);
 
             if lag > TIP_SYNC_WARNING_THRESHOLD_MS {
+                report.sync_warning_triggered = true;
                 print_warning(
                     "Node appears to still be syncing or is behind the network tip. This proof is valid for your current local tip; rerun after sync completes for latest-state verification.",
                 );
-                if !prompt_continue_on_sync_warning(no_input)? {
+                let continue_anyway = prompt_continue_on_sync_warning(no_input)?;
+                report.continued_after_sync_warning = Some(continue_anyway);
+                if !continue_anyway {
                     print_error("Verification aborted by user due to sync advisory.");
+                    report.aborted_due_to_sync_warning = true;
+                    report.error = Some("aborted by user due to sync advisory".to_string());
                     return Ok(false);
                 }
                 print_info("Continuing verification against latest local synced tip.");
@@ -1555,8 +1626,12 @@ fn verify_genesis(
             (original_genesis, header, "original")
         } else {
             print_error("Neither hardwired nor original genesis headers were found");
+            report.error =
+                Some("neither hardwired nor original genesis headers were found".to_string());
             return Ok(false);
         };
+    report.genesis_mode = Some(genesis_kind.to_string());
+    report.active_genesis_hash = Some(hex_of(&active_genesis_hash));
 
     print_info(&format!("Detected genesis mode: {genesis_kind}"));
     print_info(&format!(
@@ -1572,6 +1647,7 @@ fn verify_genesis(
 
     if calculated_genesis_hash != active_genesis_hash {
         print_error("Genesis header hash mismatch");
+        report.error = Some("genesis header hash mismatch".to_string());
         return Ok(false);
     }
 
@@ -1618,6 +1694,7 @@ fn verify_genesis(
 
         if calc_tx_hash != genesis_header.hash_merkle_root {
             print_error("Genesis coinbase transaction hash mismatch");
+            report.error = Some("genesis coinbase transaction hash mismatch".to_string());
             return Ok(false);
         }
 
@@ -1655,6 +1732,7 @@ fn verify_genesis(
     let chain_tip = if !tips.is_empty() { tips[0] } else { hst };
     if chain_tip == [0u8; 32] {
         print_error("No valid chain tip found to verify");
+        report.error = Some("no valid chain tip found to verify".to_string());
         return Ok(false);
     }
 
@@ -1671,6 +1749,7 @@ fn verify_genesis(
     if !assert_cryptographic_hash_chain_to_genesis(store, chain_tip, active_genesis_hash, verbose)?
     {
         print_error("Hash chain verification failed");
+        report.error = Some("hash chain verification failed".to_string());
         return Ok(false);
     }
     print_success("Hash chain from current state to genesis verified");
@@ -1731,6 +1810,9 @@ fn verify_genesis(
                     "Checkpoint: {}",
                     hex_of(&checkpoint_header.utxo_commitment)
                 ));
+                report.error = Some(
+                    "utxo commitment mismatch between hardwired genesis and checkpoint".to_string(),
+                );
                 return Ok(false);
             }
         }
@@ -1743,6 +1825,7 @@ fn verify_genesis(
             verbose,
         )? {
             print_error("Checkpoint chain verification failed");
+            report.error = Some("checkpoint chain verification failed".to_string());
             return Ok(false);
         }
 
@@ -1762,14 +1845,18 @@ fn verify_genesis(
                 print_success("Original genesis has empty UTXO set verified!");
             } else {
                 print_error("Original genesis UTXO commitment is not empty");
+                report.error = Some("original genesis UTXO commitment is not empty".to_string());
                 return Ok(false);
             }
         } else {
             print_error("Original genesis header not found in checkpoint dataset");
+            report.error =
+                Some("original genesis header not found in checkpoint dataset".to_string());
             return Ok(false);
         }
     } else {
         print_error("Checkpoint header not found in checkpoint dataset");
+        report.error = Some("checkpoint header not found in checkpoint dataset".to_string());
         return Ok(false);
     }
 
@@ -1806,6 +1893,7 @@ fn verify_genesis(
 
 fn main() {
     let cli = Cli::parse();
+    let mut report = build_initial_report(&cli);
 
     println!("{BOLD}Kaspa Genesis Proof Verification (Rust-Native){END}");
     println!("Requested node type: {:?}", cli.node_type);
@@ -1816,12 +1904,26 @@ fn main() {
         println!("Input data directory: auto-detect (OS default Kaspa locations)");
     }
 
-    let exit_code = match run(&cli) {
-        Ok(true) => 0,
-        Ok(false) => 1,
+    let mut exit_code = match run(&cli, &mut report) {
+        Ok(success) => {
+            report.success = success;
+            if success { 0 } else { 1 }
+        }
         Err(err) => {
             print_error(&format!("Verification failed with error: {err}"));
+            report.success = false;
+            report.error = Some(err.to_string());
             1
+        }
+    };
+
+    if let Some(json_out) = cli.json_out.as_deref() {
+        match write_json_report(json_out, &report) {
+            Ok(_) => print_info(&format!("JSON report written to {}", json_out.display())),
+            Err(err) => {
+                print_error(&format!("Failed writing JSON report: {err}"));
+                exit_code = 1;
+            }
         }
     };
 
@@ -1834,7 +1936,7 @@ fn main() {
     std::process::exit(exit_code);
 }
 
-fn run(cli: &Cli) -> Result<bool> {
+fn run(cli: &Cli, report: &mut VerificationReport) -> Result<bool> {
     let OpenStoreResult {
         mut store,
         input_path,
@@ -1848,5 +1950,6 @@ fn run(cli: &Cli) -> Result<bool> {
         cli.pre_checkpoint_datadir.as_deref(),
         cli.verbose,
         cli.no_input,
+        report,
     )
 }
