@@ -93,10 +93,6 @@ impl HeaderStore for RustStore {
             }
         }
 
-        if tips_set.is_empty() {
-            tips_set.insert(hst);
-        }
-
         let tips = tips_set.into_iter().collect::<Vec<_>>();
         Ok((tips, hst))
     }

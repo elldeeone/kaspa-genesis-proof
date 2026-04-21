@@ -1,9 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use crate::hashing::{
-    choose_chain_tip_for_verification, hash32_from_hex, header_hash, hex_of, transaction_hash,
-};
+use crate::hashing::{hash32_from_hex, header_hash, hex_of, transaction_hash};
 use crate::output::{
     capture_output_line, format_duration_ms, now_millis, print_error, print_header, print_info,
     print_success, print_warning, prompt_continue_on_sync_warning,
@@ -11,10 +9,24 @@ use crate::output::{
 use crate::store::open_store_with_resolved_input;
 use crate::{
     BOLD, CHECKPOINT_HASH_HEX, CheckpointStore, Cli, EMPTY_MUHASH_HEX, END,
-    HARDWIRED_GENESIS_HASH_HEX, HARDWIRED_GENESIS_TX_PAYLOAD_HEX, Hash32, HeaderSource,
-    HeaderStore, MAINNET_SUBNETWORK_ID_COINBASE_HEX, ORIGINAL_GENESIS_HASH_HEX, OpenStoreResult,
+    HARDWIRED_GENESIS_BITCOIN_BLOCK_HASH_HEX, HARDWIRED_GENESIS_HASH_HEX,
+    HARDWIRED_GENESIS_TX_PAYLOAD_HEX, Hash32, HeaderSource, HeaderStore,
+    MAINNET_SUBNETWORK_ID_COINBASE_HEX, ORIGINAL_GENESIS_BITCOIN_BLOCK_HASH_HEX,
+    ORIGINAL_GENESIS_HASH_HEX, ORIGINAL_GENESIS_TX_PAYLOAD_HEX, OpenStoreResult,
     TIP_SYNC_WARNING_THRESHOLD_MS, Transaction, VerificationReport,
 };
+
+fn choose_chain_tip_for_verification(tips: &[Hash32], headers_selected_tip: Hash32) -> Hash32 {
+    if let Some(first_tip) = tips.first().copied() {
+        return first_tip;
+    }
+
+    if headers_selected_tip != [0u8; 32] {
+        return headers_selected_tip;
+    }
+
+    [0u8; 32]
+}
 
 fn assert_cryptographic_hash_chain_to_genesis(
     source: &mut dyn HeaderSource,
@@ -70,13 +82,20 @@ fn assert_cryptographic_hash_chain_to_genesis(
 }
 
 pub(crate) fn hardwired_genesis_coinbase_tx() -> Result<Transaction> {
+    genesis_coinbase_tx_from_payload_hex(HARDWIRED_GENESIS_TX_PAYLOAD_HEX)
+}
+
+pub(crate) fn original_genesis_coinbase_tx() -> Result<Transaction> {
+    genesis_coinbase_tx_from_payload_hex(ORIGINAL_GENESIS_TX_PAYLOAD_HEX)
+}
+
+fn genesis_coinbase_tx_from_payload_hex(payload_hex: &str) -> Result<Transaction> {
     let subnetwork_id_bytes = hex::decode(MAINNET_SUBNETWORK_ID_COINBASE_HEX)
         .context("invalid coinbase subnetwork id constant")?;
     let mut subnetwork_id = [0u8; 20];
     subnetwork_id.copy_from_slice(&subnetwork_id_bytes);
 
-    let payload = hex::decode(HARDWIRED_GENESIS_TX_PAYLOAD_HEX)
-        .context("invalid hardwired genesis coinbase payload hex")?;
+    let payload = hex::decode(payload_hex).context("invalid genesis coinbase payload hex")?;
 
     Ok(Transaction {
         version: 0,
@@ -146,17 +165,41 @@ where
 
     print_header("Step 2: Current Chain State");
     let (tips, hst) = store.tips()?;
+    let chain_tip = choose_chain_tip_for_verification(&tips, hst);
     print_info(&format!("Number of DAG tips: {}", tips.len()));
     print_info(&format!("Headers selected tip: {}", hex_of(&hst)));
     report.tips_count = Some(tips.len());
     report.headers_selected_tip = Some(hex_of(&hst));
+    report.chain_tip_used = Some(hex_of(&chain_tip));
     report.tips = tips.iter().map(hex_of).collect();
 
-    if let Some(hst_header) = store.get_raw_header(&hst)? {
-        let tip_ts = hst_header.time_in_milliseconds;
-        print_info(&format!("Headers selected tip timestamp: {tip_ts} ms"));
-        report.headers_selected_tip_timestamp_ms = Some(tip_ts);
+    let hst_header = store.get_raw_header(&hst)?;
+    if let Some(header) = hst_header.as_ref() {
+        report.headers_selected_tip_timestamp_ms = Some(header.time_in_milliseconds);
+        if chain_tip != hst {
+            print_info(&format!(
+                "Headers selected tip timestamp: {} ms",
+                header.time_in_milliseconds
+            ));
+        }
+    }
 
+    let chain_tip_header = if chain_tip == [0u8; 32] {
+        None
+    } else if chain_tip == hst {
+        hst_header
+    } else {
+        print_info(&format!(
+            "Proof chain tip selected from DAG tips: {}",
+            hex_of(&chain_tip)
+        ));
+        store.get_raw_header(&chain_tip)?
+    };
+
+    if let Some(chain_tip_header) = chain_tip_header {
+        let tip_ts = chain_tip_header.time_in_milliseconds;
+        print_info(&format!("Proof chain tip timestamp: {tip_ts} ms"));
+        report.chain_tip_timestamp_ms = Some(tip_ts);
         let now = now_millis()?;
         if now >= tip_ts {
             let lag = now - tip_ts;
@@ -192,7 +235,7 @@ where
         }
     } else {
         print_warning(
-            "Could not read selected-tip header timestamp, so sync status advisory is unavailable.",
+            "Could not read proof-tip header timestamp, so sync status advisory is unavailable.",
         );
     }
 
@@ -282,6 +325,8 @@ where
         let hebrew_text = &genesis_coinbase_tx.payload[20..140];
         let bitcoin_hash = &genesis_coinbase_tx.payload[140..172];
         let checkpoint_ref = &genesis_coinbase_tx.payload[172..204];
+        let expected_bitcoin_hash = hex::decode(HARDWIRED_GENESIS_BITCOIN_BLOCK_HASH_HEX)
+            .context("invalid hardwired bitcoin block hash constant")?;
 
         print_info("Embedded data in genesis transaction:");
         print_info(&format!(
@@ -293,23 +338,32 @@ where
             hex::encode(bitcoin_hash)
         ));
         print_info("    (Bitcoin block #808080, provides timestamp anchor)");
+        if bitcoin_hash != expected_bitcoin_hash.as_slice() {
+            print_error("Hardwired genesis bitcoin block reference mismatch");
+            report.error = Some("hardwired genesis bitcoin block reference mismatch".to_string());
+            return Ok(false);
+        }
         print_success("Bitcoin block reference verified");
         print_info(&format!(
             "  Checkpoint block reference: {}",
             hex::encode(checkpoint_ref)
         ));
         print_info("    (Kaspa checkpoint block for UTXO state)");
+        if checkpoint_ref != checkpoint_hash {
+            print_error("Hardwired genesis checkpoint block reference mismatch");
+            report.error =
+                Some("hardwired genesis checkpoint block reference mismatch".to_string());
+            return Ok(false);
+        }
         print_success("Checkpoint block reference verified");
     } else {
         print_info("Legacy/original genesis detected.");
         print_info(
-            "Coinbase payload for original genesis is not embedded in this verifier build, so tx->merkle verification is skipped for this mode.",
+            "Original genesis coinbase verification is performed in pre-checkpoint verification.",
         );
     }
 
     print_header("Step 5: Hash Chain Verification");
-    let chain_tip = choose_chain_tip_for_verification(&tips, hst);
-    report.chain_tip_used = Some(hex_of(&chain_tip));
     if chain_tip == [0u8; 32] {
         print_error("No valid chain tip found to verify");
         report.error = Some("no valid chain tip found to verify".to_string());
@@ -372,6 +426,13 @@ where
 
     if let Some(checkpoint_header) = checkpoint_store.get_raw_header(&checkpoint_hash)? {
         print_success("Checkpoint header found");
+        let calculated_checkpoint_hash = header_hash(&checkpoint_header);
+        if calculated_checkpoint_hash != checkpoint_hash {
+            print_error("Checkpoint header hash mismatch");
+            report.error = Some("checkpoint header hash mismatch".to_string());
+            return Ok(false);
+        }
+        print_success("Checkpoint header hash verified");
         print_info(&format!(
             "Checkpoint UTXO commitment: {}",
             hex_of(&checkpoint_header.utxo_commitment)
@@ -412,6 +473,49 @@ where
         print_success("Checkpoint chain to original genesis verified");
 
         if let Some(original_genesis_header) = checkpoint_store.get_raw_header(&original_genesis)? {
+            let calculated_original_genesis_hash = header_hash(&original_genesis_header);
+            if calculated_original_genesis_hash != original_genesis {
+                print_error("Original genesis header hash mismatch");
+                report.error = Some("original genesis header hash mismatch".to_string());
+                return Ok(false);
+            }
+
+            let original_genesis_coinbase_tx = original_genesis_coinbase_tx()?;
+            let original_calc_tx_hash = transaction_hash(&original_genesis_coinbase_tx, true);
+            let original_bitcoin_hash = &original_genesis_coinbase_tx.payload[140..172];
+            let expected_original_bitcoin_hash =
+                hex::decode(ORIGINAL_GENESIS_BITCOIN_BLOCK_HASH_HEX)
+                    .context("invalid original genesis bitcoin block hash constant")?;
+
+            print_info(&format!(
+                "Original genesis coinbase tx hash: {}",
+                hex_of(&original_calc_tx_hash)
+            ));
+            print_info(&format!(
+                "Original genesis merkle root:     {}",
+                hex_of(&original_genesis_header.hash_merkle_root)
+            ));
+            print_info(&format!(
+                "Original genesis bitcoin reference: {}",
+                hex::encode(original_bitcoin_hash)
+            ));
+
+            if original_calc_tx_hash != original_genesis_header.hash_merkle_root {
+                print_error("Original genesis coinbase transaction hash mismatch");
+                report.error =
+                    Some("original genesis coinbase transaction hash mismatch".to_string());
+                return Ok(false);
+            }
+
+            if original_bitcoin_hash != expected_original_bitcoin_hash.as_slice() {
+                print_error("Original genesis bitcoin block reference mismatch");
+                report.error =
+                    Some("original genesis bitcoin block reference mismatch".to_string());
+                return Ok(false);
+            }
+
+            print_success("Original genesis coinbase transaction verified");
+            print_success("Original genesis bitcoin block reference verified");
             print_info(&format!(
                 "Original genesis UTXO commitment: {}",
                 hex_of(&original_genesis_header.utxo_commitment)
@@ -450,11 +554,12 @@ where
     if active_genesis_hash == hardwired_genesis {
         print_info("  ✓ Hardwired genesis coinbase transaction verified");
     } else {
-        print_info("  ✓ Legacy genesis mode detected (coinbase payload check skipped)");
+        print_info("  ✓ Legacy genesis mode detected");
     }
     print_info("  ✓ Hash chain from current tip to genesis verified");
     print_info("  ✓ UTXO commitment analysis completed");
     print_info("  ✓ Pre-checkpoint verification completed");
+    print_info("  ✓ Original genesis coinbase transaction verified");
     print_info("  ✓ Original genesis empty UTXO set verified");
 
     print_success("The Kaspa blockchain integrity has been verified");
@@ -569,7 +674,11 @@ mod tests {
             .expect("original genesis header")
     }
 
-    fn make_tip_header(pruning_point: Hash32, time_in_milliseconds: u64) -> (Hash32, ParsedHeader) {
+    fn make_tip_header_with_blue_work(
+        pruning_point: Hash32,
+        time_in_milliseconds: u64,
+        blue_work_trimmed_be: Vec<u8>,
+    ) -> (Hash32, ParsedHeader) {
         let header = ParsedHeader {
             version: 1,
             parents: vec![vec![test_hash(0x11)]],
@@ -581,11 +690,15 @@ mod tests {
             nonce: 42,
             daa_score: 7,
             blue_score: 8,
-            blue_work_trimmed_be: vec![0x01, 0x02, 0x03],
+            blue_work_trimmed_be,
             pruning_point,
         };
         let hash = header_hash(&header);
         (hash, header)
+    }
+
+    fn make_tip_header(pruning_point: Hash32, time_in_milliseconds: u64) -> (Hash32, ParsedHeader) {
+        make_tip_header_with_blue_work(pruning_point, time_in_milliseconds, vec![0x01, 0x02, 0x03])
     }
 
     fn fake_store_with_tip(
@@ -605,6 +718,45 @@ mod tests {
             db_path: PathBuf::from("/tmp/fake-db"),
             notes: vec!["fixture note".to_string()],
         }
+    }
+
+    #[test]
+    fn choose_chain_tip_prefers_first_dag_tip_even_when_hst_differs() {
+        let first_tip = test_hash(0x11);
+        let tips = vec![first_tip, test_hash(0x22)];
+        let headers_selected_tip = test_hash(0x77);
+
+        assert_eq!(
+            choose_chain_tip_for_verification(&tips, headers_selected_tip),
+            first_tip
+        );
+    }
+
+    #[test]
+    fn choose_chain_tip_uses_first_dag_tip_even_when_hst_is_also_present() {
+        let first_tip = test_hash(0x11);
+        let headers_selected_tip = test_hash(0x77);
+        let tips = vec![first_tip, headers_selected_tip];
+
+        assert_eq!(
+            choose_chain_tip_for_verification(&tips, headers_selected_tip),
+            first_tip
+        );
+    }
+
+    #[test]
+    fn choose_chain_tip_falls_back_to_headers_selected_tip_when_no_dag_tips_exist() {
+        let headers_selected_tip = test_hash(0x77);
+
+        assert_eq!(
+            choose_chain_tip_for_verification(&[], headers_selected_tip),
+            headers_selected_tip
+        );
+    }
+
+    #[test]
+    fn choose_chain_tip_returns_zero_when_no_dag_tip_or_selected_tip_exists() {
+        assert_eq!(choose_chain_tip_for_verification(&[], [0u8; 32]), [0u8; 32]);
     }
 
     #[test]
@@ -663,6 +815,148 @@ mod tests {
             Some(ORIGINAL_GENESIS_HASH_HEX)
         );
         assert_eq!(report.error, None);
+    }
+
+    #[test]
+    fn verify_genesis_prefers_real_dag_tip_over_headers_selected_tip() {
+        clear_output_capture();
+        let tip_time = now_millis().expect("now");
+        let hardwired_genesis =
+            hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX).expect("hardwired genesis hash");
+        let (real_tip_hash, real_tip_header) = make_tip_header(hardwired_genesis, tip_time);
+        let headers_selected_tip = test_hash(0xfe);
+        let mut headers = HashMap::new();
+        headers.insert(hardwired_genesis, hardwired_genesis_header());
+        headers.insert(real_tip_hash, real_tip_header);
+
+        let mut store = FakeStore {
+            headers,
+            tips: vec![real_tip_hash],
+            headers_selected_tip,
+            db_path: PathBuf::from("/tmp/fake-db"),
+            notes: Vec::new(),
+        };
+        let mut report = base_report();
+
+        let result = verify_genesis_with_prompt(
+            &mut store,
+            Path::new("/tmp/fake-input"),
+            &[],
+            false,
+            false,
+            &mut report,
+            |_| -> Result<bool> { panic!("sync warning prompt should not run") },
+        )
+        .expect("verify genesis");
+
+        let expected_hst = hex_of(&headers_selected_tip);
+        let expected_chain_tip = hex_of(&real_tip_hash);
+        assert!(result);
+        assert_eq!(
+            report.headers_selected_tip.as_deref(),
+            Some(expected_hst.as_str())
+        );
+        assert_eq!(
+            report.chain_tip_used.as_deref(),
+            Some(expected_chain_tip.as_str())
+        );
+        assert_eq!(report.error, None);
+    }
+
+    #[test]
+    fn verify_genesis_uses_real_chain_tip_for_sync_age_when_hst_is_stale() {
+        clear_output_capture();
+        let fresh_tip_time = now_millis().expect("now");
+        let stale_hst_time = fresh_tip_time.saturating_sub(TIP_SYNC_WARNING_THRESHOLD_MS + 1);
+        let hardwired_genesis =
+            hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX).expect("hardwired genesis hash");
+        let (real_tip_hash, real_tip_header) = make_tip_header(hardwired_genesis, fresh_tip_time);
+        let headers_selected_tip = test_hash(0xfd);
+        let (_unused_hash, stale_hst_header) = make_tip_header(hardwired_genesis, stale_hst_time);
+        let mut headers = HashMap::new();
+        headers.insert(hardwired_genesis, hardwired_genesis_header());
+        headers.insert(real_tip_hash, real_tip_header);
+        headers.insert(headers_selected_tip, stale_hst_header);
+
+        let mut store = FakeStore {
+            headers,
+            tips: vec![real_tip_hash],
+            headers_selected_tip,
+            db_path: PathBuf::from("/tmp/fake-db"),
+            notes: Vec::new(),
+        };
+        let mut report = base_report();
+
+        let result = verify_genesis_with_prompt(
+            &mut store,
+            Path::new("/tmp/fake-input"),
+            &[],
+            false,
+            false,
+            &mut report,
+            |_| -> Result<bool> { panic!("sync warning prompt should not run") },
+        )
+        .expect("verify genesis");
+
+        assert!(result);
+        assert_eq!(report.chain_tip_timestamp_ms, Some(fresh_tip_time));
+        assert_eq!(
+            report.headers_selected_tip_timestamp_ms,
+            Some(stale_hst_time)
+        );
+        assert!(!report.sync_warning_triggered);
+        assert!(report.tip_age_ms.unwrap_or(u64::MAX) < TIP_SYNC_WARNING_THRESHOLD_MS);
+    }
+
+    #[test]
+    fn verify_genesis_uses_real_chain_tip_for_sync_warning_when_hst_is_fresh() {
+        clear_output_capture();
+        let fresh_hst_time = now_millis().expect("now");
+        let stale_tip_time = fresh_hst_time.saturating_sub(TIP_SYNC_WARNING_THRESHOLD_MS + 1);
+        let hardwired_genesis =
+            hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX).expect("hardwired genesis hash");
+        let (real_tip_hash, real_tip_header) = make_tip_header(hardwired_genesis, stale_tip_time);
+        let headers_selected_tip = test_hash(0xfc);
+        let (_unused_hash, fresh_hst_header) = make_tip_header(hardwired_genesis, fresh_hst_time);
+        let mut headers = HashMap::new();
+        headers.insert(hardwired_genesis, hardwired_genesis_header());
+        headers.insert(real_tip_hash, real_tip_header);
+        headers.insert(headers_selected_tip, fresh_hst_header);
+
+        let mut store = FakeStore {
+            headers,
+            tips: vec![real_tip_hash],
+            headers_selected_tip,
+            db_path: PathBuf::from("/tmp/fake-db"),
+            notes: Vec::new(),
+        };
+        let mut report = base_report();
+        let mut prompt_calls = 0usize;
+
+        let result = verify_genesis_with_prompt(
+            &mut store,
+            Path::new("/tmp/fake-input"),
+            &[],
+            false,
+            false,
+            &mut report,
+            |_| {
+                prompt_calls += 1;
+                Ok(true)
+            },
+        )
+        .expect("verify genesis");
+
+        assert!(result);
+        assert_eq!(prompt_calls, 1);
+        assert_eq!(report.chain_tip_timestamp_ms, Some(stale_tip_time));
+        assert_eq!(
+            report.headers_selected_tip_timestamp_ms,
+            Some(fresh_hst_time)
+        );
+        assert!(report.sync_warning_triggered);
+        assert_eq!(report.continued_after_sync_warning, Some(true));
+        assert!(report.tip_age_ms.unwrap_or(0) > TIP_SYNC_WARNING_THRESHOLD_MS);
     }
 
     #[test]

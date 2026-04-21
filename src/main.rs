@@ -44,8 +44,13 @@ const CHECKPOINT_HASH_HEX: &str =
 const EMPTY_MUHASH_HEX: &str = "544eb3142c000f0ad2c76ac41f4222abbababed830eeafee4b6dc56b52d5cac0";
 
 const MAINNET_SUBNETWORK_ID_COINBASE_HEX: &str = "0100000000000000000000000000000000000000";
+const HARDWIRED_GENESIS_BITCOIN_BLOCK_HASH_HEX: &str =
+    "0000000000000000000b1f8e1c17b0133d439174e52efbb0c41c3583a8aa66b0";
+const ORIGINAL_GENESIS_BITCOIN_BLOCK_HASH_HEX: &str =
+    "00000000000000000001733c62adb19f1b77fa0735d0e11f25af36fc9ca908a5";
 
 const HARDWIRED_GENESIS_TX_PAYLOAD_HEX: &str = "000000000000000000e1f5050000000000000100d795d79ed79420d793d79920d7a2d79cd799d79a20d795d7a2d79c20d790d797d799d79a20d799d799d798d79120d791d7a9d790d7a820d79bd7a1d7a4d79020d795d793d794d791d79420d79cd79ed7a2d791d79320d79bd7a8d7a2d795d7aa20d790d79cd794d79bd79d20d7aad7a2d791d793d795d79f0000000000000000000b1f8e1c17b0133d439174e52efbb0c41c3583a8aa66b00fca37ca667c2d550a6c4416dad9717e50927128c424fa4edbebc436ab13aeef";
+const ORIGINAL_GENESIS_TX_PAYLOAD_HEX: &str = "000000000000000000e1f5050000000000000100d795d79ed79420d793d79920d7a2d79cd799d79a20d795d7a2d79c20d790d797d799d79a20d799d799d798d79120d791d7a9d790d7a820d79bd7a1d7a4d79020d795d793d794d791d79420d79cd79ed7a2d791d79320d79bd7a8d7a2d795d7aa20d790d79cd794d79bd79d20d7aad7a2d791d793d795d79f00000000000000000001733c62adb19f1b77fa0735d0e11f25af36fc9ca908a5";
 
 const CHECKPOINT_DATA_JSON: &str = include_str!("../checkpoint_data.json");
 const TIP_SYNC_WARNING_THRESHOLD_MS: u64 = 10 * 60 * 1000;
@@ -288,14 +293,13 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::hashing::{
-        choose_chain_tip_for_verification, decode_tip_hash_from_key_suffix, hash32_from_hex,
-        header_hash, hex_of, transaction_hash,
+        decode_tip_hash_from_key_suffix, hash32_from_hex, header_hash, hex_of, transaction_hash,
     };
     use crate::store::{
         open_store_with_resolved_input, parse_consensus_entry_dir_name,
         parse_current_consensus_key, resolve_rust_db_path,
     };
-    use crate::verify::hardwired_genesis_coinbase_tx;
+    use crate::verify::{hardwired_genesis_coinbase_tx, original_genesis_coinbase_tx};
 
     fn create_temp_datadir() -> (TempDir, PathBuf, PathBuf) {
         let tempdir = TempDir::new().expect("tempdir");
@@ -566,6 +570,38 @@ mod tests {
     }
 
     #[test]
+    fn hardwired_genesis_payload_embeds_expected_bitcoin_and_checkpoint_hashes() {
+        let tx = hardwired_genesis_coinbase_tx().expect("hardwired tx");
+
+        assert_eq!(
+            hex::encode(&tx.payload[140..172]),
+            HARDWIRED_GENESIS_BITCOIN_BLOCK_HASH_HEX
+        );
+        assert_eq!(hex::encode(&tx.payload[172..204]), CHECKPOINT_HASH_HEX);
+    }
+
+    #[test]
+    fn original_genesis_coinbase_tx_hash_matches_original_genesis_merkle_root() {
+        let tx = original_genesis_coinbase_tx().expect("original genesis tx");
+        let tx_hash = transaction_hash(&tx, true);
+
+        assert_eq!(
+            hex_of(&tx_hash),
+            "caedaf7d4a08bbe89011640c4841b66d5bba67d7288ce6d67228db000966e974"
+        );
+    }
+
+    #[test]
+    fn original_genesis_payload_embeds_expected_bitcoin_hash() {
+        let tx = original_genesis_coinbase_tx().expect("original genesis tx");
+
+        assert_eq!(
+            hex::encode(&tx.payload[140..172]),
+            ORIGINAL_GENESIS_BITCOIN_BLOCK_HASH_HEX
+        );
+    }
+
+    #[test]
     fn hardwired_genesis_header_hash_matches_live_node_hash() {
         let header = ParsedHeader {
             version: 0,
@@ -667,28 +703,6 @@ mod tests {
     }
 
     #[test]
-    fn choose_chain_tip_prefers_headers_selected_tip() {
-        let tips = vec![test_hash(0x11), test_hash(0x22)];
-        let headers_selected_tip = test_hash(0x77);
-
-        assert_eq!(
-            choose_chain_tip_for_verification(&tips, headers_selected_tip),
-            headers_selected_tip
-        );
-    }
-
-    #[test]
-    fn choose_chain_tip_falls_back_to_first_tip_when_selected_tip_missing() {
-        let first_tip = test_hash(0x11);
-        let tips = vec![first_tip, test_hash(0x22)];
-
-        assert_eq!(
-            choose_chain_tip_for_verification(&tips, [0u8; 32]),
-            first_tip
-        );
-    }
-
-    #[test]
     fn rust_store_tips_reads_live_style_tip_keys() {
         let (_tempdir, datadir, consensus_root) = create_temp_datadir();
         let db_path = consensus_root.join("consensus-002");
@@ -715,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn rust_store_tips_falls_back_to_selected_tip_when_tip_store_is_empty() {
+    fn rust_store_tips_returns_empty_list_when_tip_store_is_empty() {
         let (_tempdir, _datadir, consensus_root) = create_temp_datadir();
         let db_path = consensus_root.join("consensus-002");
         let headers_selected_tip = test_hash(0x55);
@@ -726,7 +740,7 @@ mod tests {
         let (tips, hst) = store.tips().expect("read tips");
 
         assert_eq!(hst, headers_selected_tip);
-        assert_eq!(tips, vec![headers_selected_tip]);
+        assert!(tips.is_empty());
     }
 
     #[test]

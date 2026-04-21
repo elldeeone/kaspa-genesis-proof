@@ -142,17 +142,6 @@ pub(crate) fn decode_tip_hash_from_key_suffix(suffix: &[u8]) -> Option<Hash32> {
     None
 }
 
-pub(crate) fn choose_chain_tip_for_verification(
-    tips: &[Hash32],
-    headers_selected_tip: Hash32,
-) -> Hash32 {
-    if headers_selected_tip != [0u8; 32] {
-        return headers_selected_tip;
-    }
-
-    tips.first().copied().unwrap_or([0u8; 32])
-}
-
 fn new_blake2b_32(key: &[u8]) -> blake2b_simd::State {
     let mut params = Params::new();
     params.hash_length(32);

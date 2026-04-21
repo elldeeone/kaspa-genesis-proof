@@ -71,6 +71,7 @@ pub(crate) struct VerificationReport {
     pub(crate) tips_count: Option<usize>,
     pub(crate) headers_selected_tip: Option<String>,
     pub(crate) headers_selected_tip_timestamp_ms: Option<u64>,
+    pub(crate) chain_tip_timestamp_ms: Option<u64>,
     pub(crate) tip_age_ms: Option<u64>,
     pub(crate) sync_warning_triggered: bool,
     pub(crate) continued_after_sync_warning: Option<bool>,
