@@ -1,18 +1,22 @@
-use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use rocksdb::DB as RocksDb;
 use rusty_leveldb::DB as LevelDb;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 mod hashing;
+mod model;
 mod output;
 mod store;
 mod verify;
 
+pub(crate) use model::{
+    CheckpointJson, Hash32, HeaderSource, HeaderStore, ParsedHeader, Transaction,
+    VerificationReport,
+};
 use output::{
     build_initial_report, capture_output_line, clear_output_capture, now_millis,
     output_capture_snapshot, print_error, print_info, print_plain, prompt_export_json_decision,
@@ -51,8 +55,6 @@ const LEGACY_MULTI_CONSENSUS_METADATA_KEY: &[u8] = b"multi-consensus-metadata-ke
 const LEGACY_CONSENSUS_ENTRIES_PREFIX: &[u8] = b"consensus-entries-prefix";
 const ROCKSDB_READ_ONLY_MAX_OPEN_FILES: i32 = 128;
 static OUTPUT_CAPTURE: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
-
-type Hash32 = [u8; 32];
 
 #[derive(Parser, Debug)]
 #[command(
@@ -106,61 +108,6 @@ enum CliNodeType {
     Go,
 }
 
-#[derive(Clone, Debug)]
-struct ParsedHeader {
-    version: u16,
-    parents: Vec<Vec<Hash32>>,
-    hash_merkle_root: Hash32,
-    accepted_id_merkle_root: Hash32,
-    utxo_commitment: Hash32,
-    time_in_milliseconds: u64,
-    bits: u32,
-    nonce: u64,
-    daa_score: u64,
-    blue_score: u64,
-    blue_work_trimmed_be: Vec<u8>,
-    pruning_point: Hash32,
-}
-
-#[derive(Clone, Debug)]
-struct Transaction {
-    version: u16,
-    inputs: Vec<TransactionInput>,
-    outputs: Vec<TransactionOutput>,
-    lock_time: u64,
-    subnetwork_id: [u8; 20],
-    gas: u64,
-    payload: Vec<u8>,
-    mass: u64,
-}
-
-#[derive(Clone, Debug)]
-struct TransactionInput {
-    previous_txid: Hash32,
-    previous_index: u32,
-    signature_script: Vec<u8>,
-    sequence: u64,
-    sig_op_count: u8,
-}
-
-#[derive(Clone, Debug)]
-struct TransactionOutput {
-    value: u64,
-    script_public_key_version: u16,
-    script_public_key_script: Vec<u8>,
-}
-
-trait HeaderSource {
-    fn get_raw_header(&mut self, block_hash: &Hash32) -> Result<Option<ParsedHeader>>;
-}
-
-trait HeaderStore: HeaderSource {
-    fn store_name(&self) -> &'static str;
-    fn resolved_db_path(&self) -> &Path;
-    fn resolution_notes(&self) -> &[String];
-    fn tips(&mut self) -> Result<(Vec<Hash32>, Hash32)>;
-}
-
 #[derive(Debug)]
 struct RustStore {
     db: RocksDb,
@@ -189,30 +136,6 @@ struct OpenStoreResult {
     store: Box<dyn HeaderStore>,
     input_path: PathBuf,
     probe_notes: Vec<String>,
-}
-
-#[derive(Debug, Default, Serialize)]
-struct VerificationReport {
-    generated_at_unix_ms: u64,
-    success: bool,
-    requested_node_type: String,
-    provided_datadir: Option<String>,
-    resolved_input_path: Option<String>,
-    resolved_db_path: Option<String>,
-    store_type: Option<String>,
-    tips_count: Option<usize>,
-    headers_selected_tip: Option<String>,
-    headers_selected_tip_timestamp_ms: Option<u64>,
-    tip_age_ms: Option<u64>,
-    sync_warning_triggered: bool,
-    continued_after_sync_warning: Option<bool>,
-    aborted_due_to_sync_warning: bool,
-    genesis_mode: Option<String>,
-    active_genesis_hash: Option<String>,
-    chain_tip_used: Option<String>,
-    tips: Vec<String>,
-    screen_output_lines: Vec<String>,
-    error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,38 +202,6 @@ struct HeaderWireLegacy {
     blue_work: [u64; 3],
     blue_score: u64,
     pruning_point: Hash32,
-}
-
-#[derive(Debug, Deserialize)]
-struct CheckpointJson {
-    checkpoint_hash: String,
-    original_genesis_hash: String,
-    headers_chain: Vec<CheckpointHeaderJson>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CheckpointHeaderJson {
-    hash: String,
-    version: u16,
-    parents: Vec<Vec<String>>,
-    #[serde(rename = "hashMerkleRoot")]
-    hash_merkle_root: String,
-    #[serde(rename = "acceptedIDMerkleRoot")]
-    accepted_id_merkle_root: String,
-    #[serde(rename = "utxoCommitment")]
-    utxo_commitment: String,
-    #[serde(rename = "timeInMilliseconds")]
-    time_in_milliseconds: u64,
-    bits: u32,
-    nonce: u64,
-    #[serde(rename = "daaScore")]
-    daa_score: u64,
-    #[serde(rename = "blueScore")]
-    blue_score: u64,
-    #[serde(rename = "blueWork")]
-    blue_work: String,
-    #[serde(rename = "pruningPoint")]
-    pruning_point: String,
 }
 
 fn main() {

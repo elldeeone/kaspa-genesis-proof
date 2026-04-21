@@ -98,6 +98,29 @@ pub(crate) fn verify_genesis(
     no_input: bool,
     report: &mut VerificationReport,
 ) -> Result<bool> {
+    verify_genesis_with_prompt(
+        store,
+        input_path,
+        probe_notes,
+        verbose,
+        no_input,
+        report,
+        prompt_continue_on_sync_warning,
+    )
+}
+
+fn verify_genesis_with_prompt<F>(
+    store: &mut dyn HeaderStore,
+    input_path: &Path,
+    probe_notes: &[String],
+    verbose: bool,
+    no_input: bool,
+    report: &mut VerificationReport,
+    mut prompt_continue: F,
+) -> Result<bool>
+where
+    F: FnMut(bool) -> Result<bool>,
+{
     let hardwired_genesis = hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX)?;
     let original_genesis = hash32_from_hex(ORIGINAL_GENESIS_HASH_HEX)?;
     let checkpoint_hash = hash32_from_hex(CHECKPOINT_HASH_HEX)?;
@@ -148,7 +171,7 @@ pub(crate) fn verify_genesis(
                 print_warning(
                     "Node appears to still be syncing or is behind the network tip. This proof is valid for your current local tip; rerun after sync completes for latest-state verification.",
                 );
-                let continue_anyway = prompt_continue_on_sync_warning(no_input)?;
+                let continue_anyway = prompt_continue(no_input)?;
                 report.continued_after_sync_warning = Some(continue_anyway);
                 if !continue_anyway {
                     print_error("Verification aborted by user due to sync advisory.");
@@ -458,4 +481,343 @@ pub(crate) fn run(cli: &Cli, report: &mut VerificationReport) -> Result<bool> {
         cli.no_input,
         report,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use crate::ParsedHeader;
+    use crate::hashing::{hash32_from_hex, header_hash};
+    use crate::output::clear_output_capture;
+
+    struct FakeStore {
+        headers: HashMap<Hash32, ParsedHeader>,
+        tips: Vec<Hash32>,
+        headers_selected_tip: Hash32,
+        db_path: PathBuf,
+        notes: Vec<String>,
+    }
+
+    impl HeaderSource for FakeStore {
+        fn get_raw_header(&mut self, block_hash: &Hash32) -> Result<Option<ParsedHeader>> {
+            Ok(self.headers.get(block_hash).cloned())
+        }
+    }
+
+    impl HeaderStore for FakeStore {
+        fn store_name(&self) -> &'static str {
+            "Fake test store"
+        }
+
+        fn resolved_db_path(&self) -> &Path {
+            &self.db_path
+        }
+
+        fn resolution_notes(&self) -> &[String] {
+            &self.notes
+        }
+
+        fn tips(&mut self) -> Result<(Vec<Hash32>, Hash32)> {
+            Ok((self.tips.clone(), self.headers_selected_tip))
+        }
+    }
+
+    fn test_hash(fill: u8) -> Hash32 {
+        [fill; 32]
+    }
+
+    fn base_report() -> VerificationReport {
+        VerificationReport {
+            requested_node_type: "test".to_string(),
+            ..VerificationReport::default()
+        }
+    }
+
+    fn hardwired_genesis_header() -> ParsedHeader {
+        ParsedHeader {
+            version: 0,
+            parents: Vec::new(),
+            hash_merkle_root: hash32_from_hex(
+                "8ec898568c6801d13df4ee6e2a1b54b7e6236f671f20954f05306410518eeb32",
+            )
+            .expect("hash merkle root"),
+            accepted_id_merkle_root: [0u8; 32],
+            utxo_commitment: hash32_from_hex(
+                "710f27df423e63aa6cdb72b89ea5a06cffa399d66f167704455b5af59def8e20",
+            )
+            .expect("utxo commitment"),
+            time_in_milliseconds: 1_637_609_671_037,
+            bits: 486_722_099,
+            nonce: 211_244,
+            daa_score: 1_312_860,
+            blue_score: 0,
+            blue_work_trimmed_be: Vec::new(),
+            pruning_point: [0u8; 32],
+        }
+    }
+
+    fn original_genesis_header() -> ParsedHeader {
+        let mut checkpoint_store = CheckpointStore::from_embedded_json().expect("checkpoint store");
+        let original_genesis_hash =
+            hash32_from_hex(ORIGINAL_GENESIS_HASH_HEX).expect("original genesis hash");
+        checkpoint_store
+            .get_raw_header(&original_genesis_hash)
+            .expect("read original genesis")
+            .expect("original genesis header")
+    }
+
+    fn make_tip_header(pruning_point: Hash32, time_in_milliseconds: u64) -> (Hash32, ParsedHeader) {
+        let header = ParsedHeader {
+            version: 1,
+            parents: vec![vec![test_hash(0x11)]],
+            hash_merkle_root: test_hash(0x22),
+            accepted_id_merkle_root: test_hash(0x33),
+            utxo_commitment: test_hash(0x44),
+            time_in_milliseconds,
+            bits: 0x1d00ffff,
+            nonce: 42,
+            daa_score: 7,
+            blue_score: 8,
+            blue_work_trimmed_be: vec![0x01, 0x02, 0x03],
+            pruning_point,
+        };
+        let hash = header_hash(&header);
+        (hash, header)
+    }
+
+    fn fake_store_with_tip(
+        genesis_hash: Hash32,
+        genesis_header: ParsedHeader,
+        tip_time_in_milliseconds: u64,
+    ) -> FakeStore {
+        let (tip_hash, tip_header) = make_tip_header(genesis_hash, tip_time_in_milliseconds);
+        let mut headers = HashMap::new();
+        headers.insert(genesis_hash, genesis_header);
+        headers.insert(tip_hash, tip_header);
+
+        FakeStore {
+            headers,
+            tips: vec![tip_hash],
+            headers_selected_tip: tip_hash,
+            db_path: PathBuf::from("/tmp/fake-db"),
+            notes: vec!["fixture note".to_string()],
+        }
+    }
+
+    #[test]
+    fn verify_genesis_succeeds_for_hardwired_mode() {
+        clear_output_capture();
+        let tip_time = now_millis().expect("now");
+        let hardwired_genesis =
+            hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX).expect("hardwired genesis hash");
+        let mut store =
+            fake_store_with_tip(hardwired_genesis, hardwired_genesis_header(), tip_time);
+        let mut report = base_report();
+
+        let result = verify_genesis_with_prompt(
+            &mut store,
+            Path::new("/tmp/fake-input"),
+            &["probe note".to_string()],
+            false,
+            false,
+            &mut report,
+            |_| -> Result<bool> { panic!("sync warning prompt should not run") },
+        )
+        .expect("verify genesis");
+
+        assert!(result);
+        assert_eq!(report.genesis_mode.as_deref(), Some("hardwired"));
+        assert_eq!(report.tips_count, Some(1));
+        assert_eq!(report.store_type.as_deref(), Some("Fake test store"));
+        assert_eq!(report.error, None);
+        assert_eq!(report.tips.len(), 1);
+    }
+
+    #[test]
+    fn verify_genesis_succeeds_for_original_mode() {
+        clear_output_capture();
+        let tip_time = now_millis().expect("now");
+        let original_genesis =
+            hash32_from_hex(ORIGINAL_GENESIS_HASH_HEX).expect("original genesis hash");
+        let mut store = fake_store_with_tip(original_genesis, original_genesis_header(), tip_time);
+        let mut report = base_report();
+
+        let result = verify_genesis_with_prompt(
+            &mut store,
+            Path::new("/tmp/fake-input"),
+            &[],
+            false,
+            false,
+            &mut report,
+            |_| -> Result<bool> { panic!("sync warning prompt should not run") },
+        )
+        .expect("verify genesis");
+
+        assert!(result);
+        assert_eq!(report.genesis_mode.as_deref(), Some("original"));
+        assert_eq!(
+            report.active_genesis_hash.as_deref(),
+            Some(ORIGINAL_GENESIS_HASH_HEX)
+        );
+        assert_eq!(report.error, None);
+    }
+
+    #[test]
+    fn verify_genesis_records_sync_warning_and_continues_when_prompt_accepts() {
+        clear_output_capture();
+        let stale_tip_time = now_millis()
+            .expect("now")
+            .saturating_sub(TIP_SYNC_WARNING_THRESHOLD_MS + 1);
+        let hardwired_genesis =
+            hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX).expect("hardwired genesis hash");
+        let mut store = fake_store_with_tip(
+            hardwired_genesis,
+            hardwired_genesis_header(),
+            stale_tip_time,
+        );
+        let mut report = base_report();
+        let mut prompt_calls = 0usize;
+
+        let result = verify_genesis_with_prompt(
+            &mut store,
+            Path::new("/tmp/fake-input"),
+            &[],
+            false,
+            false,
+            &mut report,
+            |no_input| {
+                prompt_calls += 1;
+                assert!(!no_input);
+                Ok(true)
+            },
+        )
+        .expect("verify genesis");
+
+        assert!(result);
+        assert_eq!(prompt_calls, 1);
+        assert!(report.sync_warning_triggered);
+        assert_eq!(report.continued_after_sync_warning, Some(true));
+        assert!(!report.aborted_due_to_sync_warning);
+        assert_eq!(report.error, None);
+    }
+
+    #[test]
+    fn verify_genesis_aborts_when_sync_prompt_rejects() {
+        clear_output_capture();
+        let stale_tip_time = now_millis()
+            .expect("now")
+            .saturating_sub(TIP_SYNC_WARNING_THRESHOLD_MS + 1);
+        let hardwired_genesis =
+            hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX).expect("hardwired genesis hash");
+        let mut store = fake_store_with_tip(
+            hardwired_genesis,
+            hardwired_genesis_header(),
+            stale_tip_time,
+        );
+        let mut report = base_report();
+        let mut prompt_calls = 0usize;
+
+        let result = verify_genesis_with_prompt(
+            &mut store,
+            Path::new("/tmp/fake-input"),
+            &[],
+            false,
+            false,
+            &mut report,
+            |no_input| {
+                prompt_calls += 1;
+                assert!(!no_input);
+                Ok(false)
+            },
+        )
+        .expect("verify genesis");
+
+        assert!(!result);
+        assert_eq!(prompt_calls, 1);
+        assert!(report.sync_warning_triggered);
+        assert_eq!(report.continued_after_sync_warning, Some(false));
+        assert!(report.aborted_due_to_sync_warning);
+        assert_eq!(
+            report.error.as_deref(),
+            Some("aborted by user due to sync advisory")
+        );
+    }
+
+    #[test]
+    fn verify_genesis_fails_when_tip_header_is_missing() {
+        clear_output_capture();
+        let hardwired_genesis =
+            hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX).expect("hardwired genesis hash");
+        let missing_tip_hash = test_hash(0xaa);
+        let mut headers = HashMap::new();
+        headers.insert(hardwired_genesis, hardwired_genesis_header());
+
+        let mut store = FakeStore {
+            headers,
+            tips: vec![missing_tip_hash],
+            headers_selected_tip: missing_tip_hash,
+            db_path: PathBuf::from("/tmp/fake-db"),
+            notes: Vec::new(),
+        };
+        let mut report = base_report();
+
+        let result = verify_genesis_with_prompt(
+            &mut store,
+            Path::new("/tmp/fake-input"),
+            &[],
+            false,
+            false,
+            &mut report,
+            |_| -> Result<bool> { panic!("sync warning prompt should not run") },
+        )
+        .expect("verify genesis");
+
+        assert!(!result);
+        assert_eq!(
+            report.error.as_deref(),
+            Some("hash chain verification failed")
+        );
+    }
+
+    #[test]
+    fn verify_genesis_fails_when_tip_hash_does_not_match_header_contents() {
+        clear_output_capture();
+        let tip_time = now_millis().expect("now");
+        let hardwired_genesis =
+            hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX).expect("hardwired genesis hash");
+        let wrong_tip_hash = test_hash(0xbb);
+        let (_actual_tip_hash, tip_header) = make_tip_header(hardwired_genesis, tip_time);
+        let mut headers = HashMap::new();
+        headers.insert(hardwired_genesis, hardwired_genesis_header());
+        headers.insert(wrong_tip_hash, tip_header);
+
+        let mut store = FakeStore {
+            headers,
+            tips: vec![wrong_tip_hash],
+            headers_selected_tip: wrong_tip_hash,
+            db_path: PathBuf::from("/tmp/fake-db"),
+            notes: Vec::new(),
+        };
+        let mut report = base_report();
+
+        let result = verify_genesis_with_prompt(
+            &mut store,
+            Path::new("/tmp/fake-input"),
+            &[],
+            false,
+            false,
+            &mut report,
+            |_| -> Result<bool> { panic!("sync warning prompt should not run") },
+        )
+        .expect("verify genesis");
+
+        assert!(!result);
+        assert_eq!(
+            report.error.as_deref(),
+            Some("hash chain verification failed")
+        );
+    }
 }
