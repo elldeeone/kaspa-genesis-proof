@@ -1,6 +1,7 @@
 from collections import deque
 import struct
 import os
+import time
 from pathlib import Path
 
 # Try to import database packages
@@ -68,6 +69,8 @@ class DatabaseStorePrefixes:
 # Database key separator (same as Rust)
 SEPARATOR = 255  # u8::MAX
 MAX_OPEN_FILES = 128
+OPEN_RETRY_ATTEMPTS = 3
+OPEN_RETRY_DELAY_SECONDS = 0.25
 LEGACY_MULTI_CONSENSUS_METADATA_KEY = b'multi-consensus-metadata-key'
 LEGACY_CONSENSUS_ENTRIES_PREFIX = b'consensus-entries-prefix'
 
@@ -83,11 +86,30 @@ def _create_rocksdb_options(max_open_files=MAX_OPEN_FILES):
 
 def _open_rocksdb_readonly(db_path, max_open_files=MAX_OPEN_FILES):
     """Open a RocksDB database in read-only raw mode."""
-    return rocksdict.Rdict(
-        str(db_path),
-        options=_create_rocksdb_options(max_open_files),
-        access_type=rocksdict.AccessType.read_only(),
-    )
+    last_error = None
+
+    for attempt in range(OPEN_RETRY_ATTEMPTS):
+        try:
+            return rocksdict.Rdict(
+                str(db_path),
+                options=_create_rocksdb_options(max_open_files),
+                access_type=rocksdict.AccessType.read_only(),
+            )
+        except Exception as exc:
+            last_error = exc
+            if attempt == OPEN_RETRY_ATTEMPTS - 1:
+                break
+
+            # Live nodes can compact or rotate SST files while we are opening the DB.
+            time.sleep(OPEN_RETRY_DELAY_SECONDS * (attempt + 1))
+
+    raise last_error
+
+def _extract_sortable_block_hash(data):
+    """Extract the hash field from a bincode-serialized SortableBlock value."""
+    if not data:
+        return b''
+    return data[:32] if len(data) >= 32 else data
 
 def _read_optional_u64(data, pos):
     """Decode a bincode-serialized Option<u64>."""
@@ -545,6 +567,19 @@ class Store:
         """Close the database connection"""
         if self.db_available and self.db is not None:
             self.db.close()
+
+    def _iter_prefix_entries(self, prefix):
+        """Yield raw RocksDB key/value pairs for a direct-prefix store."""
+        iterator = self.db.iter()
+        iterator.seek(prefix)
+
+        while iterator.valid():
+            key = iterator.key()
+            if key is None or not key.startswith(prefix):
+                break
+
+            yield key, iterator.value()
+            iterator.next()
     
     def get_raw_header(self, block_hash):
         """
@@ -668,60 +703,46 @@ class Store:
             print("Headers selected tip not found")
             hst_hash = b'\x00' * 32
         else:
-            # Headers selected tip is stored as raw hash bytes
-            hst_hash = hst_bytes[:32] if len(hst_bytes) >= 32 else hst_bytes
-        
-        # Get tips - in Rust nodes, tips are stored as individual entries
+            # Headers selected tip is stored as a bincode-serialized SortableBlock.
+            hst_hash = _extract_sortable_block_hash(hst_bytes)
+
+        # Get tips - in current Rust nodes, tips are stored as individual set entries.
         tips_list = []
         
         try:
-            # Method 1: Try to find tips using known hashes (starting with headers selected tip)
-            # In Rust, each tip is stored with key: [consensus prefix] + [TIPS prefix] + [bincode(hash)]
-            if len(hst_hash) == 32 and hst_hash != b'\x00' * 32:
-                # Check if the headers selected tip is stored as a tip
-                import struct
-                
-                # Bincode serialization of a 32-byte hash in Rust
-                # The hash bytes are prefixed with their length (32 as u64)
-                bincode_hash = struct.pack('<Q', 32) + hst_hash
-                
-                tips_prefix = self._get_active_prefix() + bytes([DatabaseStorePrefixes.TIPS])
-                tip_key = tips_prefix + bincode_hash
-                
-                # Check if this key exists
-                if self.db.get(tip_key) is not None:
-                    tips_list.append(hst_hash)
-                    print(f"Found tip via headers selected tip: {hst_hash.hex()}")
-            
-            # Method 2: Try reading tips as a serialized list (legacy format)
+            tips_prefix = self._build_key(DatabaseStorePrefixes.TIPS)
+            seen = set()
+
+            for key, _ in self._iter_prefix_entries(tips_prefix):
+                tip_hash = key[len(tips_prefix):]
+                if len(tip_hash) != 32 or tip_hash in seen:
+                    continue
+                seen.add(tip_hash)
+                tips_list.append(tip_hash)
+
+            # Legacy fallback: older layouts stored tips as a serialized Vec<Hash> value.
             if not tips_list:
-                tips_key = self._build_key(DatabaseStorePrefixes.TIPS)
-                tips_bytes = self.db.get(tips_key)
+                tips_bytes = self.db.get(tips_prefix)
                 
                 if tips_bytes and len(tips_bytes) >= 8:
-                    # Tips stored as bincode-serialized Vec<Hash>
                     tips_count = struct.unpack('<Q', tips_bytes[:8])[0]
                     pos = 8
                     
-                    for i in range(min(tips_count, 100)):  # Limit to 100 tips
-                        if pos + 32 <= len(tips_bytes):
-                            tip_hash = tips_bytes[pos:pos+32]
-                            tips_list.append(tip_hash)
-                            pos += 32
-                    
-                    pass  # Successfully found tips using legacy format
-            
-            # Method 3: If no tips found, use headers selected tip as the single tip
-            if not tips_list and len(hst_hash) == 32 and hst_hash != b'\x00' * 32:
-                # In most cases, the headers selected tip is the only active tip
-                # This is the expected behavior for a synced node
-                tips_list = [hst_hash]
+                    for _ in range(min(tips_count, 100)):
+                        if pos + 32 > len(tips_bytes):
+                            break
+                        tip_hash = tips_bytes[pos:pos+32]
+                        pos += 32
+                        if tip_hash in seen:
+                            continue
+                        seen.add(tip_hash)
+                        tips_list.append(tip_hash)
+
+            # Preserve the distinction between real DAG tips and the headers selected tip.
+            # Callers can decide if and when HST is a safe fallback.
                         
         except Exception as e:
             print(f"Error reading tips: {e}")
-            # Fallback to headers selected tip
-            if len(hst_hash) == 32 and hst_hash != b'\x00' * 32:
-                tips_list = [hst_hash]
         
         return tips_list, hst_hash
     

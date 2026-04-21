@@ -327,8 +327,12 @@ def verify_genesis(node_type, datadir, pre_checkpoint_datadir=None, verbose=Fals
         # Step 5: Verify hash chain from tips to genesis
         print_header("Step 5: Hash Chain Verification")
         
-        # Use tips if available, otherwise use headers selected tip
-        chain_tip = tips[0] if tips else hst
+        # Anchor the proof to an actual DAG tip when available. The headers selected tip
+        # can run ahead of the body-tips store on live/syncing nodes, so only use it as
+        # a fallback when we could not read any DAG tips.
+        chain_tip = tips[0] if tips else (
+            hst if len(hst) == 32 and hst != b'\x00' * 32 else b''
+        )
         if chain_tip:
             print_info(f"Starting hash chain verification from tip: {chain_tip.hex()}")
             print_info(f"Target genesis hash: {genesis_hash.hex()}")
