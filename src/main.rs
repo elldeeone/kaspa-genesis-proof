@@ -740,6 +740,14 @@ fn decode_tip_hash_from_key_suffix(suffix: &[u8]) -> Option<Hash32> {
     None
 }
 
+fn choose_chain_tip_for_verification(tips: &[Hash32], headers_selected_tip: Hash32) -> Hash32 {
+    if headers_selected_tip != [0u8; 32] {
+        return headers_selected_tip;
+    }
+
+    tips.first().copied().unwrap_or([0u8; 32])
+}
+
 fn new_blake2b_32(key: &[u8]) -> blake2b_simd::State {
     let mut params = Params::new();
     params.hash_length(32);
@@ -1853,7 +1861,7 @@ fn verify_genesis(
     }
 
     print_header("Step 5: Hash Chain Verification");
-    let chain_tip = if !tips.is_empty() { tips[0] } else { hst };
+    let chain_tip = choose_chain_tip_for_verification(&tips, hst);
     report.chain_tip_used = Some(hex_of(&chain_tip));
     if chain_tip == [0u8; 32] {
         print_error("No valid chain tip found to verify");
@@ -2127,6 +2135,23 @@ mod tests {
         drop(db);
     }
 
+    fn create_consensus_db(db_path: &Path, entries: &[(Vec<u8>, Vec<u8>)]) {
+        fs::create_dir_all(db_path).expect("create consensus db dir");
+
+        let mut opts = RocksOptions::default();
+        opts.create_if_missing(true);
+
+        let db = RocksDb::open(&opts, db_path).expect("open consensus db");
+        for (key, value) in entries {
+            db.put(key, value).expect("write consensus key");
+        }
+        drop(db);
+    }
+
+    fn test_hash(fill: u8) -> Hash32 {
+        [fill; 32]
+    }
+
     fn encode_option_u64(value: Option<u64>) -> Vec<u8> {
         match value {
             None => vec![0],
@@ -2306,5 +2331,94 @@ mod tests {
             parse_consensus_entry_dir_name(&live_entry_bytes).expect("parse entry"),
             "consensus-002"
         );
+    }
+
+    #[test]
+    fn decode_tip_hash_from_key_suffix_supports_live_raw_tip_keys() {
+        let tip_hash = test_hash(0x24);
+
+        assert_eq!(
+            decode_tip_hash_from_key_suffix(&tip_hash).expect("decode raw tip suffix"),
+            tip_hash
+        );
+    }
+
+    #[test]
+    fn decode_tip_hash_from_key_suffix_supports_length_prefixed_tip_keys() {
+        let tip_hash = test_hash(0x42);
+        let mut encoded = Vec::from(32u64.to_le_bytes());
+        encoded.extend_from_slice(&tip_hash);
+
+        assert_eq!(
+            decode_tip_hash_from_key_suffix(&encoded).expect("decode length-prefixed tip suffix"),
+            tip_hash
+        );
+    }
+
+    #[test]
+    fn choose_chain_tip_prefers_headers_selected_tip() {
+        let tips = vec![test_hash(0x11), test_hash(0x22)];
+        let headers_selected_tip = test_hash(0x77);
+
+        assert_eq!(
+            choose_chain_tip_for_verification(&tips, headers_selected_tip),
+            headers_selected_tip
+        );
+    }
+
+    #[test]
+    fn choose_chain_tip_falls_back_to_first_tip_when_selected_tip_missing() {
+        let first_tip = test_hash(0x11);
+        let tips = vec![first_tip, test_hash(0x22)];
+
+        assert_eq!(
+            choose_chain_tip_for_verification(&tips, [0u8; 32]),
+            first_tip
+        );
+    }
+
+    #[test]
+    fn rust_store_tips_reads_live_style_tip_keys() {
+        let (_tempdir, datadir, consensus_root) = create_temp_datadir();
+        let db_path = consensus_root.join("consensus-002");
+        let headers_selected_tip = test_hash(0x90);
+        let other_tip = test_hash(0xab);
+
+        create_consensus_db(
+            &db_path,
+            &[
+                (vec![7u8], headers_selected_tip.to_vec()),
+                ([vec![24u8], headers_selected_tip.to_vec()].concat(), Vec::new()),
+                ([vec![24u8], other_tip.to_vec()].concat(), Vec::new()),
+            ],
+        );
+
+        let mut store = RustStore::open(&datadir).expect("open rust store");
+        let (tips, hst) = store.tips().expect("read tips");
+
+        assert_eq!(hst, headers_selected_tip);
+        assert_eq!(tips, vec![headers_selected_tip, other_tip]);
+    }
+
+    #[test]
+    fn rust_store_tips_falls_back_to_selected_tip_when_tip_store_is_empty() {
+        let (_tempdir, _datadir, consensus_root) = create_temp_datadir();
+        let db_path = consensus_root.join("consensus-002");
+        let headers_selected_tip = test_hash(0x55);
+
+        create_consensus_db(&db_path, &[(vec![7u8], headers_selected_tip.to_vec())]);
+
+        let mut store = RustStore::open(&db_path).expect("open rust store");
+        let (tips, hst) = store.tips().expect("read tips");
+
+        assert_eq!(hst, headers_selected_tip);
+        assert_eq!(tips, vec![headers_selected_tip]);
+    }
+
+    #[test]
+    fn rocksdb_read_only_open_files_limit_stays_bounded_for_live_nodes() {
+        assert_eq!(ROCKSDB_READ_ONLY_MAX_OPEN_FILES, 128);
+        assert!(ROCKSDB_READ_ONLY_MAX_OPEN_FILES > 0);
+        assert!(ROCKSDB_READ_ONLY_MAX_OPEN_FILES < 1024);
     }
 }
