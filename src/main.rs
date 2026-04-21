@@ -4,7 +4,7 @@ use rusty_leveldb::DB as LevelDb;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 mod hashing;
@@ -284,6 +284,7 @@ mod tests {
     use rocksdb::{DB as RocksDb, Options as RocksOptions};
     use rusty_leveldb::{DB as LevelDb, Options as LevelOptions};
     use std::fs;
+    use std::path::Path;
     use tempfile::TempDir;
 
     use crate::hashing::{
