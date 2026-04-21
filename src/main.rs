@@ -38,6 +38,11 @@ const HARDWIRED_GENESIS_TX_PAYLOAD_HEX: &str = "000000000000000000e1f50500000000
 
 const CHECKPOINT_DATA_JSON: &str = include_str!("../checkpoint_data.json");
 const TIP_SYNC_WARNING_THRESHOLD_MS: u64 = 10 * 60 * 1000;
+const RUST_MULTI_CONSENSUS_METADATA_KEY: &[u8] = &[124u8];
+const RUST_CONSENSUS_ENTRY_PREFIX: &[u8] = &[125u8];
+const LEGACY_MULTI_CONSENSUS_METADATA_KEY: &[u8] = b"multi-consensus-metadata-key";
+const LEGACY_CONSENSUS_ENTRIES_PREFIX: &[u8] = b"consensus-entries-prefix";
+const ROCKSDB_READ_ONLY_MAX_OPEN_FILES: i32 = 128;
 static OUTPUT_CAPTURE: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
 type Hash32 = [u8; 32];
@@ -1157,6 +1162,8 @@ impl CheckpointStore {
 fn open_rocksdb_read_only(path: &Path) -> Result<RocksDb> {
     let mut opts = RocksOptions::default();
     opts.create_if_missing(false);
+    // Keep verifier FD usage bounded so it can run alongside a live node.
+    opts.set_max_open_files(ROCKSDB_READ_ONLY_MAX_OPEN_FILES);
     opts.set_comparator(
         "leveldb.BytewiseComparator",
         Box::new(|a: &[u8], b: &[u8]| a.cmp(b)),
@@ -1203,21 +1210,84 @@ fn list_consensus_dirs(consensus_root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn read_consensus_entry_dir_name(meta_db: &RocksDb, key: u64) -> Result<Option<String>> {
-    let mut entry_key = vec![125u8];
-    entry_key.extend_from_slice(&key.to_le_bytes());
+    let key_suffix = key.to_le_bytes();
 
-    let Some(bytes) = meta_db
-        .get(&entry_key)
-        .with_context(|| format!("failed reading consensus entry key {key}"))?
-    else {
+    for entry_key in [
+        [RUST_CONSENSUS_ENTRY_PREFIX, key_suffix.as_slice()].concat(),
+        [LEGACY_CONSENSUS_ENTRIES_PREFIX, key_suffix.as_slice()].concat(),
+    ] {
+        let Some(bytes) = meta_db
+            .get(&entry_key)
+            .with_context(|| format!("failed reading consensus entry key {key}"))?
+        else {
+            continue;
+        };
+
+        return parse_consensus_entry_dir_name(&bytes)
+            .with_context(|| format!("failed decoding consensus entry {key}"))
+            .map(Some);
+    }
+
+    Ok(None)
+}
+
+fn parse_current_consensus_key(metadata_bytes: &[u8]) -> Result<Option<u64>> {
+    if metadata_bytes.is_empty() {
         return Ok(None);
-    };
+    }
 
-    let entry: ConsensusEntry = bincode::deserialize(&bytes)
-        .with_context(|| format!("failed decoding consensus entry {key}"))?;
+    if let Ok(metadata) = bincode::deserialize::<MultiConsensusMetadata>(metadata_bytes) {
+        let _ = (
+            metadata.max_key_used,
+            metadata.is_archival_node,
+            metadata.props.len(),
+            metadata.version,
+            metadata.staging_consensus_key,
+        );
+        return Ok(metadata.current_consensus_key);
+    }
 
-    let _ = (entry.key, entry.creation_timestamp);
-    Ok(Some(entry.directory_name))
+    match metadata_bytes[0] {
+        0 => Ok(None),
+        1 => {
+            if metadata_bytes.len() < 9 {
+                bail!("metadata ended before Option<u64> value");
+            }
+
+            Ok(Some(u64::from_le_bytes(
+                metadata_bytes[1..9]
+                    .try_into()
+                    .map_err(|_| anyhow!("invalid Option<u64> payload length"))?,
+            )))
+        }
+        tag => bail!("invalid Option<u64> tag: {tag}"),
+    }
+}
+
+fn parse_consensus_entry_dir_name(entry_bytes: &[u8]) -> Result<String> {
+    if let Ok(entry) = bincode::deserialize::<ConsensusEntry>(entry_bytes) {
+        let _ = (entry.key, entry.creation_timestamp);
+        return Ok(entry.directory_name);
+    }
+
+    if entry_bytes.len() < 24 {
+        bail!("consensus entry shorter than minimum struct size");
+    }
+
+    let name_len = u64::from_le_bytes(
+        entry_bytes[8..16]
+            .try_into()
+            .map_err(|_| anyhow!("invalid consensus entry name length bytes"))?,
+    ) as usize;
+    let name_end = 16 + name_len;
+    if name_end + 8 > entry_bytes.len() {
+        bail!("consensus entry ended before directory name/timestamp");
+    }
+
+    let directory_name = std::str::from_utf8(&entry_bytes[16..name_end])
+        .context("consensus entry directory name is not valid utf-8")?;
+
+    Ok(directory_name.to_string())
 }
 
 fn resolve_rust_db_path(input_path: &Path) -> Result<RustDbResolution> {
@@ -1274,34 +1344,41 @@ fn resolve_rust_db_path(input_path: &Path) -> Result<RustDbResolution> {
     }
 
     let mut active_dir_name: Option<String> = None;
-    let mut staging_dir_name: Option<String> = None;
     let mut detected_layout = "rust-consensus-directory-fallback".to_string();
 
     if let Some(meta_path) = meta_path {
         if is_db_dir(&meta_path) {
             match open_rocksdb_read_only(&meta_path) {
                 Ok(meta_db) => {
-                    if let Some(bytes) = meta_db
-                        .get([124u8])
-                        .context("reading multi-consensus metadata key")?
-                    {
-                        match bincode::deserialize::<MultiConsensusMetadata>(&bytes) {
-                            Ok(metadata) => {
-                                let _ = (
-                                    metadata.max_key_used,
-                                    metadata.is_archival_node,
-                                    metadata.props.len(),
-                                    metadata.version,
-                                );
+                    let mut metadata_bytes = None;
+                    for metadata_key in [
+                        RUST_MULTI_CONSENSUS_METADATA_KEY,
+                        LEGACY_MULTI_CONSENSUS_METADATA_KEY,
+                    ] {
+                        if let Some(bytes) = meta_db
+                            .get(metadata_key)
+                            .with_context(|| {
+                                format!(
+                                    "reading multi-consensus metadata key {}",
+                                    String::from_utf8_lossy(metadata_key)
+                                )
+                            })?
+                        {
+                            metadata_bytes = Some(bytes);
+                            break;
+                        }
+                    }
 
-                                if let Some(k) = metadata.current_consensus_key {
-                                    active_dir_name = read_consensus_entry_dir_name(&meta_db, k)?;
-                                }
-                                if let Some(k) = metadata.staging_consensus_key {
-                                    staging_dir_name = read_consensus_entry_dir_name(&meta_db, k)?;
-                                }
-
+                    if let Some(bytes) = metadata_bytes {
+                        match parse_current_consensus_key(&bytes) {
+                            Ok(Some(k)) => {
+                                active_dir_name = read_consensus_entry_dir_name(&meta_db, k)?;
                                 detected_layout = "rust-meta-managed".to_string();
+                            }
+                            Ok(None) => {
+                                notes.push(
+                                    "multi-consensus metadata did not specify a current consensus key (falling back to directory scan)".to_string(),
+                                );
                             }
                             Err(err) => {
                                 notes.push(format!(
@@ -1353,19 +1430,11 @@ fn resolve_rust_db_path(input_path: &Path) -> Result<RustDbResolution> {
             )
         })?;
 
-    let staging_consensus_db_path = staging_dir_name
-        .as_ref()
-        .map(|name| consensus_root.join(name))
-        .filter(|p| p.is_dir());
-
     notes.push(format!("Detected layout: {detected_layout}"));
     notes.push(format!(
         "Active consensus DB: {}",
         active_consensus_db_path.display()
     ));
-    if let Some(ref staging) = staging_consensus_db_path {
-        notes.push(format!("Staging consensus DB: {}", staging.display()));
-    }
 
     Ok(RustDbResolution {
         active_consensus_db_path,
@@ -1970,9 +2039,10 @@ fn main() {
             if success { 0 } else { 1 }
         }
         Err(err) => {
-            print_error(&format!("Verification failed with error: {err}"));
+            let error_chain = format!("{err:#}");
+            print_error(&format!("Verification failed with error: {error_chain}"));
             report.success = false;
-            report.error = Some(err.to_string());
+            report.error = Some(error_chain);
             1
         }
     };
@@ -2025,4 +2095,216 @@ fn run(cli: &Cli, report: &mut VerificationReport) -> Result<bool> {
         cli.no_input,
         report,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rocksdb::DB as RocksDb;
+    use tempfile::TempDir;
+
+    fn create_temp_datadir() -> (TempDir, PathBuf, PathBuf) {
+        let tempdir = TempDir::new().expect("tempdir");
+        let datadir = tempdir.path().join("datadir");
+        let consensus_root = datadir.join("consensus");
+
+        fs::create_dir_all(consensus_root.join("consensus-001")).expect("consensus-001");
+        fs::create_dir_all(consensus_root.join("consensus-002")).expect("consensus-002");
+
+        (tempdir, datadir, consensus_root)
+    }
+
+    fn create_meta_db(meta_path: &Path, entries: &[(Vec<u8>, Vec<u8>)]) {
+        fs::create_dir_all(meta_path).expect("create meta dir");
+
+        let mut opts = RocksOptions::default();
+        opts.create_if_missing(true);
+
+        let db = RocksDb::open(&opts, meta_path).expect("open meta db");
+        for (key, value) in entries {
+            db.put(key, value).expect("write meta key");
+        }
+        drop(db);
+    }
+
+    fn encode_option_u64(value: Option<u64>) -> Vec<u8> {
+        match value {
+            None => vec![0],
+            Some(value) => {
+                let mut bytes = vec![1];
+                bytes.extend_from_slice(&value.to_le_bytes());
+                bytes
+            }
+        }
+    }
+
+    fn encode_consensus_entry(key: u64, directory_name: &str, creation_timestamp: u64) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&key.to_le_bytes());
+        bytes.extend_from_slice(&(directory_name.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(directory_name.as_bytes());
+        bytes.extend_from_slice(&creation_timestamp.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn resolve_rust_db_path_falls_back_to_latest_consensus_dir_without_meta_db() {
+        let (_tempdir, datadir, consensus_root) = create_temp_datadir();
+
+        let resolution = resolve_rust_db_path(&datadir).expect("resolve rust datadir");
+
+        assert_eq!(
+            resolution.active_consensus_db_path,
+            consensus_root.join("consensus-002")
+        );
+        assert!(resolution
+            .notes
+            .iter()
+            .any(|note| note.contains("fallback")));
+    }
+
+    #[test]
+    fn resolve_rust_db_path_supports_legacy_meta_keys() {
+        let (_tempdir, datadir, consensus_root) = create_temp_datadir();
+        let entry_key = [
+            b"consensus-entries-prefix".as_slice(),
+            &1u64.to_le_bytes(),
+        ]
+        .concat();
+
+        create_meta_db(
+            &datadir.join("meta"),
+            &[
+                (
+                    b"multi-consensus-metadata-key".to_vec(),
+                    encode_option_u64(Some(1)),
+                ),
+                (entry_key, encode_consensus_entry(1, "consensus-001", 123)),
+            ],
+        );
+
+        let resolution = resolve_rust_db_path(&datadir).expect("resolve rust datadir");
+
+        assert_eq!(
+            resolution.active_consensus_db_path,
+            consensus_root.join("consensus-001")
+        );
+        assert!(resolution
+            .notes
+            .iter()
+            .any(|note| note.contains("rust-meta-managed")));
+    }
+
+    #[test]
+    fn resolve_rust_db_path_supports_minimal_metadata_encoding() {
+        let (_tempdir, datadir, consensus_root) = create_temp_datadir();
+        let entry_key = [[125u8].as_slice(), &1u64.to_le_bytes()].concat();
+
+        create_meta_db(
+            &datadir.join("meta"),
+            &[
+                (vec![124u8], encode_option_u64(Some(1))),
+                (entry_key, encode_consensus_entry(1, "consensus-001", 123)),
+            ],
+        );
+
+        let resolution = resolve_rust_db_path(&datadir).expect("resolve rust datadir");
+
+        assert_eq!(
+            resolution.active_consensus_db_path,
+            consensus_root.join("consensus-001")
+        );
+        assert!(resolution
+            .notes
+            .iter()
+            .any(|note| note.contains("rust-meta-managed")));
+    }
+
+    #[test]
+    fn hardwired_genesis_coinbase_tx_hash_matches_live_node_merkle_root() {
+        let tx = hardwired_genesis_coinbase_tx().expect("hardwired tx");
+        let tx_hash = transaction_hash(&tx, true);
+
+        assert_eq!(
+            hex_of(&tx_hash),
+            "8ec898568c6801d13df4ee6e2a1b54b7e6236f671f20954f05306410518eeb32"
+        );
+    }
+
+    #[test]
+    fn hardwired_genesis_header_hash_matches_live_node_hash() {
+        let header = ParsedHeader {
+            version: 0,
+            parents: Vec::new(),
+            hash_merkle_root: hash32_from_hex(
+                "8ec898568c6801d13df4ee6e2a1b54b7e6236f671f20954f05306410518eeb32",
+            )
+            .expect("hash merkle root"),
+            accepted_id_merkle_root: [0u8; 32],
+            utxo_commitment: hash32_from_hex(
+                "710f27df423e63aa6cdb72b89ea5a06cffa399d66f167704455b5af59def8e20",
+            )
+            .expect("utxo commitment"),
+            time_in_milliseconds: 1_637_609_671_037,
+            bits: 486_722_099,
+            nonce: 211_244,
+            daa_score: 1_312_860,
+            blue_score: 0,
+            blue_work_trimmed_be: Vec::new(),
+            pruning_point: [0u8; 32],
+        };
+
+        assert_eq!(hex_of(&header_hash(&header)), HARDWIRED_GENESIS_HASH_HEX);
+    }
+
+    #[test]
+    fn embedded_checkpoint_store_reaches_original_genesis_with_empty_utxo_commitment() {
+        let mut store = CheckpointStore::from_embedded_json().expect("checkpoint store");
+        let checkpoint_hash = hash32_from_hex(CHECKPOINT_HASH_HEX).expect("checkpoint hash");
+        let original_genesis_hash =
+            hash32_from_hex(ORIGINAL_GENESIS_HASH_HEX).expect("original genesis hash");
+        let empty_muhash = hash32_from_hex(EMPTY_MUHASH_HEX).expect("empty muhash");
+
+        let checkpoint_header = store
+            .get_raw_header(&checkpoint_hash)
+            .expect("checkpoint lookup")
+            .expect("checkpoint header");
+        let original_genesis_header = store
+            .get_raw_header(&original_genesis_hash)
+            .expect("genesis lookup")
+            .expect("genesis header");
+
+        assert_eq!(hex_of(&header_hash(&checkpoint_header)), CHECKPOINT_HASH_HEX);
+        assert_eq!(
+            hex_of(&header_hash(&original_genesis_header)),
+            ORIGINAL_GENESIS_HASH_HEX
+        );
+        assert_eq!(original_genesis_header.utxo_commitment, empty_muhash);
+    }
+
+    #[test]
+    fn parse_current_consensus_key_supports_live_node_metadata_bytes() {
+        let live_metadata_bytes = hex::decode(
+            "01020000000000000000020000000000000000000000000000000006000000",
+        )
+        .expect("metadata bytes");
+
+        assert_eq!(
+            parse_current_consensus_key(&live_metadata_bytes).expect("parse metadata"),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn parse_consensus_entry_dir_name_supports_live_node_entry_bytes() {
+        let live_entry_bytes = hex::decode(
+            "02000000000000000d00000000000000636f6e73656e7375732d3030327b2340189d010000",
+        )
+        .expect("entry bytes");
+
+        assert_eq!(
+            parse_consensus_entry_dir_name(&live_entry_bytes).expect("parse entry"),
+            "consensus-002"
+        );
+    }
 }
