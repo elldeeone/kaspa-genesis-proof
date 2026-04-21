@@ -5,7 +5,7 @@
 ### For Rust-based rusty-kaspa nodes (Recommended):
 - **Fully synced rusty-kaspa node**
 - **Python 3.8+**
-- **Node data location**: `~/.rusty-kaspa/kaspa-mainnet/datadir/consensus/consensus-003`
+- **Node data location**: `~/.rusty-kaspa/kaspa-mainnet/datadir`
 
 ### For Go-based kaspad nodes (Legacy):
 - **Fully synced kaspad node**
@@ -62,18 +62,20 @@ jupyter notebook verification/genesis_proof.ipynb
 
 | Platform | Rust Node Path | Go Node Path |
 |----------|---------------|--------------|
-| **macOS** | `~/.rusty-kaspa/kaspa-mainnet/datadir/consensus/consensus-003` | `~/.kaspad/kaspa-mainnet/datadir2` |
-| **Linux** | `~/.rusty-kaspa/kaspa-mainnet/datadir/consensus/consensus-003` | `~/.kaspad/kaspa-mainnet/datadir2` |
-| **Windows** | `%APPDATA%\.rusty-kaspa\kaspa-mainnet\datadir\consensus\consensus-003` | `%APPDATA%\.kaspad\kaspa-mainnet\datadir2` |
+| **macOS** | `~/.rusty-kaspa/kaspa-mainnet/datadir` | `~/.kaspad/kaspa-mainnet/datadir2` |
+| **Linux** | `~/.rusty-kaspa/kaspa-mainnet/datadir` | `~/.kaspad/kaspa-mainnet/datadir2` |
+| **Windows** | `%APPDATA%\.rusty-kaspa\kaspa-mainnet\datadir` | `%APPDATA%\.kaspad\kaspa-mainnet\datadir2` |
 
-**Note:** The verification script will automatically detect the consensus database directory within your datadir.
+**Note:** For Rust nodes, the script accepts either the root datadir or a direct
+`.../consensus/consensus-XXX` path. When given the root datadir, it automatically
+resolves the active consensus database from the node metadata.
 
 ## Troubleshooting
 
 ### Database Path Issues
 - **Error**: `Database connectivity test failed`
 - **Solution**: Verify your database path exists and contains data
-- **Check**: Run `ls -la ~/.rusty-kaspa/kaspa-mainnet/datadir/consensus/consensus-003` (or equivalent path)
+- **Check**: Run `ls -la ~/.rusty-kaspa/kaspa-mainnet/datadir/consensus` (or equivalent path)
 
 ### Python RocksDB Issues
 - **Error**: `rocksdict not available`

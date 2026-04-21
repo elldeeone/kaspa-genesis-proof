@@ -64,8 +64,12 @@ jupyter notebook verification/genesis_proof.ipynb
 ```
 
 **Common database paths:**
-- **Rust nodes**: `~/.rusty-kaspa/kaspa-mainnet/datadir/consensus/consensus-003`
+- **Rust nodes**: `~/.rusty-kaspa/kaspa-mainnet/datadir`
 - **Go nodes**: `~/.kaspad/kaspa-mainnet/datadir2`
+
+For Rust nodes, the script accepts either the root datadir or a direct
+`.../consensus/consensus-XXX` path. It will automatically resolve the active
+consensus database from the node metadata when you pass the root datadir.
 
 ## Repository Structure
 
