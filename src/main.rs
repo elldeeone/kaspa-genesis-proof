@@ -1,11 +1,10 @@
 use anyhow::{Context, Result, bail};
 use blake2b_simd::Params;
 use clap::{Parser, ValueEnum};
-use rocksdb::{DB as RocksDb, Options as RocksOptions};
+use rocksdb::DB as RocksDb;
 use rusty_leveldb::DB as LevelDb;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -19,10 +18,7 @@ use output::{
     print_success, print_warning, prompt_continue_on_sync_warning, prompt_export_json_decision,
     write_json_report,
 };
-use store::{
-    open_store_with_resolved_input, parse_consensus_entry_dir_name, parse_current_consensus_key,
-    resolve_rust_db_path,
-};
+use store::open_store_with_resolved_input;
 
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/serialization.rs"));
@@ -60,9 +56,10 @@ type Hash32 = [u8; 32];
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "kaspa-genesis-proof-rust",
-    about = "Rust-native Kaspa genesis proof verifier",
-    long_about = "Verifies cryptographic linkage from the current node state back to genesis for both rusty-kaspa (RocksDB) and legacy kaspad (LevelDB)."
+    name = "rust-native-verifier",
+    about = "Verify Kaspa chain integrity from the current node state back to genesis",
+    long_about = "Rust-native Kaspa genesis proof verifier. Verifies cryptographic linkage from the current node state back to genesis for both rusty-kaspa (RocksDB) and legacy kaspad (LevelDB), including the hardwired checkpoint/original-genesis proof chain.",
+    after_help = "Examples:\n  rust-native-verifier\n  rust-native-verifier --node-type rust --datadir ~/.rusty-kaspa/kaspa-mainnet/datadir\n  rust-native-verifier --no-input --json-out ./kaspa-proof-report.json"
 )]
 struct Cli {
     #[arg(
@@ -75,15 +72,16 @@ struct Cli {
 
     #[arg(
         long,
-        help = "Path to Kaspa data directory. If omitted, default OS paths are probed automatically"
+        help = "Path to Kaspa data directory. If omitted, KASPA_DATADIR and default OS paths are probed automatically"
     )]
     datadir: Option<PathBuf>,
 
     #[arg(
         long,
-        help = "Optional legacy pre-checkpoint path (kept for compatibility; embedded checkpoint data is used)"
+        value_name = "PATH",
+        help = "Write a JSON verification report to this path without prompting (parent directories are created as needed)"
     )]
-    pre_checkpoint_datadir: Option<PathBuf>,
+    json_out: Option<PathBuf>,
 
     #[arg(long, short = 'v', help = "Enable verbose chain-walk output")]
     verbose: bool,
@@ -614,7 +612,6 @@ fn verify_genesis(
     store: &mut dyn HeaderStore,
     input_path: &Path,
     probe_notes: &[String],
-    pre_checkpoint_datadir: Option<&Path>,
     verbose: bool,
     no_input: bool,
     report: &mut VerificationReport,
@@ -938,13 +935,6 @@ fn verify_genesis(
         return Ok(false);
     }
 
-    if let Some(path) = pre_checkpoint_datadir {
-        print_info(&format!(
-            "Note: --pre-checkpoint-datadir supplied ({}) but embedded checkpoint path already completed verification.",
-            path.display()
-        ));
-    }
-
     print_header("Verification Summary");
     print_success("All cryptographic verifications passed!");
     print_info("Verification details:");
@@ -1000,25 +990,36 @@ fn main() {
         }
     };
 
-    match prompt_export_json_decision(cli.no_input) {
-        Ok(true) => {
-            let json_out = PathBuf::from(format!(
-                "kaspa-proof-report-{}.json",
-                now_millis().unwrap_or(0)
-            ));
-            report.screen_output_lines = output_capture_snapshot();
-            match write_json_report(&json_out, &report) {
-                Ok(_) => print_info(&format!("JSON report written to {}", json_out.display())),
-                Err(err) => {
-                    print_error(&format!("Failed writing JSON report: {err}"));
-                    exit_code = 1;
-                }
+    if let Some(json_out) = cli.json_out.as_ref() {
+        report.screen_output_lines = output_capture_snapshot();
+        match write_json_report(json_out, &report) {
+            Ok(_) => print_info(&format!("JSON report written to {}", json_out.display())),
+            Err(err) => {
+                print_error(&format!("Failed writing JSON report: {err}"));
+                exit_code = 1;
             }
         }
-        Ok(false) => {}
-        Err(err) => {
-            print_error(&format!("Failed during export prompt: {err}"));
-            exit_code = 1;
+    } else {
+        match prompt_export_json_decision(cli.no_input) {
+            Ok(true) => {
+                let json_out = PathBuf::from(format!(
+                    "kaspa-proof-report-{}.json",
+                    now_millis().unwrap_or(0)
+                ));
+                report.screen_output_lines = output_capture_snapshot();
+                match write_json_report(&json_out, &report) {
+                    Ok(_) => print_info(&format!("JSON report written to {}", json_out.display())),
+                    Err(err) => {
+                        print_error(&format!("Failed writing JSON report: {err}"));
+                        exit_code = 1;
+                    }
+                }
+            }
+            Ok(false) => {}
+            Err(err) => {
+                print_error(&format!("Failed during export prompt: {err}"));
+                exit_code = 1;
+            }
         }
     }
 
@@ -1043,7 +1044,6 @@ fn run(cli: &Cli, report: &mut VerificationReport) -> Result<bool> {
         &mut *store,
         &input_path,
         &probe_notes,
-        cli.pre_checkpoint_datadir.as_deref(),
         cli.verbose,
         cli.no_input,
         report,
@@ -1053,8 +1053,14 @@ fn run(cli: &Cli, report: &mut VerificationReport) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rocksdb::DB as RocksDb;
+    use clap::error::ErrorKind;
+    use rocksdb::{DB as RocksDb, Options as RocksOptions};
+    use std::fs;
     use tempfile::TempDir;
+
+    use crate::store::{
+        parse_consensus_entry_dir_name, parse_current_consensus_key, resolve_rust_db_path,
+    };
 
     fn create_temp_datadir() -> (TempDir, PathBuf, PathBuf) {
         let tempdir = TempDir::new().expect("tempdir");
@@ -1372,5 +1378,32 @@ mod tests {
         assert_eq!(ROCKSDB_READ_ONLY_MAX_OPEN_FILES, 128);
         assert!(ROCKSDB_READ_ONLY_MAX_OPEN_FILES > 0);
         assert!(ROCKSDB_READ_ONLY_MAX_OPEN_FILES < 1024);
+    }
+
+    #[test]
+    fn cli_accepts_json_out_flag() {
+        let cli = Cli::try_parse_from([
+            "rust-native-verifier",
+            "--json-out",
+            "report.json",
+            "--no-input",
+        ])
+        .expect("parse cli");
+
+        assert_eq!(cli.json_out, Some(PathBuf::from("report.json")));
+        assert!(cli.no_input);
+    }
+
+    #[test]
+    fn cli_rejects_removed_pre_checkpoint_datadir_flag() {
+        let err = Cli::try_parse_from([
+            "rust-native-verifier",
+            "--pre-checkpoint-datadir",
+            "/tmp/pre-checkpoint",
+        ])
+        .expect_err("removed flag should be rejected");
+
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+        assert!(err.to_string().contains("--pre-checkpoint-datadir"));
     }
 }
