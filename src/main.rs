@@ -1054,7 +1054,9 @@ fn run(cli: &Cli, report: &mut VerificationReport) -> Result<bool> {
 mod tests {
     use super::*;
     use clap::error::ErrorKind;
+    use prost::Message;
     use rocksdb::{DB as RocksDb, Options as RocksOptions};
+    use rusty_leveldb::{DB as LevelDb, Options as LevelOptions};
     use std::fs;
     use tempfile::TempDir;
 
@@ -1099,6 +1101,20 @@ mod tests {
         drop(db);
     }
 
+    fn create_go_leveldb(db_path: &Path, entries: &[(Vec<u8>, Vec<u8>)]) {
+        fs::create_dir_all(db_path).expect("create go db dir");
+
+        let mut opts = LevelOptions::default();
+        opts.create_if_missing = true;
+
+        let mut db = LevelDb::open(db_path, opts).expect("open go db");
+        for (key, value) in entries {
+            db.put(key, value).expect("write go db key");
+        }
+        db.flush().expect("flush go db");
+        db.close().expect("close go db");
+    }
+
     fn test_hash(fill: u8) -> Hash32 {
         [fill; 32]
     }
@@ -1121,6 +1137,96 @@ mod tests {
         bytes.extend_from_slice(directory_name.as_bytes());
         bytes.extend_from_slice(&creation_timestamp.to_le_bytes());
         bytes
+    }
+
+    fn encode_db_hash(hash: Hash32) -> Vec<u8> {
+        proto::DbHash {
+            hash: hash.to_vec(),
+        }
+        .encode_to_vec()
+    }
+
+    fn encode_db_tips(tips: &[Hash32]) -> Vec<u8> {
+        proto::DbTips {
+            tips: tips
+                .iter()
+                .map(|hash| proto::DbHash {
+                    hash: hash.to_vec(),
+                })
+                .collect(),
+        }
+        .encode_to_vec()
+    }
+
+    fn encode_db_block_header(header: &ParsedHeader) -> Vec<u8> {
+        proto::DbBlockHeader {
+            version: u32::from(header.version),
+            parents: header
+                .parents
+                .iter()
+                .map(|level| proto::DbBlockLevelParents {
+                    parent_hashes: level
+                        .iter()
+                        .map(|hash| proto::DbHash {
+                            hash: hash.to_vec(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            hash_merkle_root: Some(proto::DbHash {
+                hash: header.hash_merkle_root.to_vec(),
+            }),
+            accepted_id_merkle_root: Some(proto::DbHash {
+                hash: header.accepted_id_merkle_root.to_vec(),
+            }),
+            utxo_commitment: Some(proto::DbHash {
+                hash: header.utxo_commitment.to_vec(),
+            }),
+            time_in_milliseconds: i64::try_from(header.time_in_milliseconds)
+                .expect("header timestamp fits in i64"),
+            bits: header.bits,
+            nonce: header.nonce,
+            daa_score: header.daa_score,
+            blue_work: header.blue_work_trimmed_be.clone(),
+            pruning_point: Some(proto::DbHash {
+                hash: header.pruning_point.to_vec(),
+            }),
+            blue_score: header.blue_score,
+        }
+        .encode_to_vec()
+    }
+
+    fn go_bucketed_key(active_prefix: u8, bucket: &[u8], suffix: Option<&[u8]>) -> Vec<u8> {
+        let mut key =
+            Vec::with_capacity(2 + bucket.len() + suffix.map(|s| 1 + s.len()).unwrap_or(0));
+        key.push(active_prefix);
+        key.push(b'/');
+        key.extend_from_slice(bucket);
+        if let Some(suffix) = suffix {
+            key.push(b'/');
+            key.extend_from_slice(suffix);
+        }
+        key
+    }
+
+    fn sample_go_header(selected_tip: Hash32) -> ParsedHeader {
+        ParsedHeader {
+            version: 9,
+            parents: vec![
+                vec![test_hash(0x33)],
+                vec![test_hash(0x44), test_hash(0x55)],
+            ],
+            hash_merkle_root: test_hash(0x66),
+            accepted_id_merkle_root: test_hash(0x77),
+            utxo_commitment: test_hash(0x88),
+            time_in_milliseconds: 1_717_171_717_171,
+            bits: 123_456_789,
+            nonce: 987_654_321,
+            daa_score: 456_789,
+            blue_score: 654_321,
+            blue_work_trimmed_be: vec![0x01, 0x23, 0x45, 0x67],
+            pruning_point: selected_tip,
+        }
     }
 
     #[test]
@@ -1378,6 +1484,98 @@ mod tests {
         assert_eq!(ROCKSDB_READ_ONLY_MAX_OPEN_FILES, 128);
         assert!(ROCKSDB_READ_ONLY_MAX_OPEN_FILES > 0);
         assert!(ROCKSDB_READ_ONLY_MAX_OPEN_FILES < 1024);
+    }
+
+    #[test]
+    fn go_store_open_finds_nested_datadir2_and_reads_upstream_layout() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let root = tempdir.path().join("go-node");
+        let db_path = root.join("kaspa-mainnet").join("datadir2");
+        let active_prefix = 1u8;
+        let selected_tip = test_hash(0x91);
+        let other_tip = test_hash(0xa2);
+        let header = sample_go_header(test_hash(0xbb));
+
+        create_go_leveldb(
+            &db_path,
+            &[
+                (b"active-prefix".to_vec(), vec![active_prefix]),
+                (
+                    go_bucketed_key(active_prefix, b"headers-selected-tip", None),
+                    encode_db_hash(selected_tip),
+                ),
+                (
+                    go_bucketed_key(active_prefix, b"tips", None),
+                    encode_db_tips(&[selected_tip, other_tip]),
+                ),
+                (
+                    go_bucketed_key(active_prefix, b"block-headers", Some(&selected_tip)),
+                    encode_db_block_header(&header),
+                ),
+            ],
+        );
+
+        let mut store = GoStore::open(&root).expect("open go store");
+        let (tips, hst) = store.tips().expect("tips");
+        let decoded_header = store
+            .get_raw_header(&selected_tip)
+            .expect("read header")
+            .expect("header exists");
+
+        assert_eq!(store.db_path, db_path);
+        assert_eq!(store.active_prefix, active_prefix);
+        assert_eq!(hst, selected_tip);
+        assert_eq!(tips, vec![selected_tip, other_tip]);
+        assert_eq!(decoded_header.version, header.version);
+        assert_eq!(decoded_header.parents, header.parents);
+        assert_eq!(decoded_header.hash_merkle_root, header.hash_merkle_root);
+        assert_eq!(
+            decoded_header.accepted_id_merkle_root,
+            header.accepted_id_merkle_root
+        );
+        assert_eq!(decoded_header.utxo_commitment, header.utxo_commitment);
+        assert_eq!(
+            decoded_header.time_in_milliseconds,
+            header.time_in_milliseconds
+        );
+        assert_eq!(decoded_header.bits, header.bits);
+        assert_eq!(decoded_header.nonce, header.nonce);
+        assert_eq!(decoded_header.daa_score, header.daa_score);
+        assert_eq!(decoded_header.blue_score, header.blue_score);
+        assert_eq!(
+            decoded_header.blue_work_trimmed_be,
+            header.blue_work_trimmed_be
+        );
+        assert_eq!(decoded_header.pruning_point, header.pruning_point);
+    }
+
+    #[test]
+    fn go_store_tips_falls_back_to_selected_tip_when_proto_tip_set_is_empty() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let db_path = tempdir.path().join("datadir2");
+        let active_prefix = 0u8;
+        let selected_tip = test_hash(0x5a);
+
+        create_go_leveldb(
+            &db_path,
+            &[
+                (b"active-prefix".to_vec(), vec![active_prefix]),
+                (
+                    go_bucketed_key(active_prefix, b"headers-selected-tip", None),
+                    encode_db_hash(selected_tip),
+                ),
+                (
+                    go_bucketed_key(active_prefix, b"tips", None),
+                    encode_db_tips(&[]),
+                ),
+            ],
+        );
+
+        let mut store = GoStore::open(&db_path).expect("open go store");
+        let (tips, hst) = store.tips().expect("tips");
+
+        assert_eq!(hst, selected_tip);
+        assert_eq!(tips, vec![selected_tip]);
     }
 
     #[test]
