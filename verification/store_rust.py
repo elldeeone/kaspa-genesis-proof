@@ -687,9 +687,13 @@ class Store:
         
         return MinimalBlock()
     
-    def tips(self):
+    def tips(self, include_hst_fallback=True):
         """
-        Get current DAG tips and headers selected tip
+        Get current DAG tips and headers selected tip.
+
+        By default, preserve historical behavior and fall back to the headers-selected
+        tip when the tips store is unreadable. Callers that need to distinguish real
+        DAG tips from this fallback can pass include_hst_fallback=False.
         """
         if not self.db_available or self.db is None:
             print("Database not available - cannot read tips")
@@ -738,11 +742,13 @@ class Store:
                         seen.add(tip_hash)
                         tips_list.append(tip_hash)
 
-            # Preserve the distinction between real DAG tips and the headers selected tip.
-            # Callers can decide if and when HST is a safe fallback.
+            if not tips_list and include_hst_fallback and len(hst_hash) == 32 and hst_hash != b'\x00' * 32:
+                tips_list = [hst_hash]
                         
         except Exception as e:
             print(f"Error reading tips: {e}")
+            if include_hst_fallback and len(hst_hash) == 32 and hst_hash != b'\x00' * 32:
+                tips_list = [hst_hash]
         
         return tips_list, hst_hash
     

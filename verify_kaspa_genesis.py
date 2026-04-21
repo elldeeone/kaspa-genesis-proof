@@ -242,7 +242,7 @@ def verify_genesis(node_type, datadir, pre_checkpoint_datadir=None, verbose=Fals
         
         # Step 2: Get current tips and verify connectivity
         print_header("Step 2: Current Chain State")
-        tips, hst = current_store.tips()
+        tips, hst = current_store.tips(include_hst_fallback=False)
         print_info(f"Number of DAG tips: {len(tips)}")
         print_info(f"Headers selected tip: {hst.hex()}")
         
