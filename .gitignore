@@ -4,3 +4,5 @@ kaspa-proof-report-*.json
 kaspa-genesis-env/
 .venv/
 venv/
+__pycache__/
+*.pyc
