@@ -205,6 +205,12 @@ def find_active_consensus_dir(datadir_root):
         raise ActiveConsensusResolutionError(
             f'metadata points to missing consensus directory: {consensus_dir}'
         )
+    except ActiveConsensusResolutionError:
+        raise
+    except Exception as exc:
+        raise ActiveConsensusResolutionError(
+            f'failed to read active consensus metadata from {meta_dir}: {exc}'
+        ) from exc
     finally:
         if db is not None:
             db.close()
