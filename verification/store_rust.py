@@ -1,6 +1,7 @@
 from collections import deque
 import struct
 import os
+from pathlib import Path
 
 # Try to import database packages
 try:
@@ -29,6 +30,7 @@ class DatabaseStorePrefixes:
     HEADERS_SELECTED_TIP = 7
     HEADERS = 8
     HEADERS_COMPACT = 9
+    COMPRESSED_HEADERS = 32
     PAST_PRUNING_POINTS = 10
     PRUNING_UTXOSET = 11
     PRUNING_UTXOSET_POSITION = 12
@@ -65,6 +67,153 @@ class DatabaseStorePrefixes:
 
 # Database key separator (same as Rust)
 SEPARATOR = 255  # u8::MAX
+MAX_OPEN_FILES = 128
+LEGACY_MULTI_CONSENSUS_METADATA_KEY = b'multi-consensus-metadata-key'
+LEGACY_CONSENSUS_ENTRIES_PREFIX = b'consensus-entries-prefix'
+
+
+class ActiveConsensusResolutionError(RuntimeError):
+    """Raised when the meta DB exists but the active consensus directory cannot be resolved."""
+
+def _create_rocksdb_options(max_open_files=MAX_OPEN_FILES):
+    """Create RocksDB options for raw-byte access to live Kaspa databases."""
+    options = rocksdict.Options(raw_mode=True)
+    options.set_max_open_files(max_open_files)
+    return options
+
+def _open_rocksdb_readonly(db_path, max_open_files=MAX_OPEN_FILES):
+    """Open a RocksDB database in read-only raw mode."""
+    return rocksdict.Rdict(
+        str(db_path),
+        options=_create_rocksdb_options(max_open_files),
+        access_type=rocksdict.AccessType.read_only(),
+    )
+
+def _read_optional_u64(data, pos):
+    """Decode a bincode-serialized Option<u64>."""
+    if pos >= len(data):
+        raise ValueError('metadata ended before Option<u64> tag')
+
+    tag = data[pos]
+    pos += 1
+
+    if tag == 0:
+        return None, pos
+    if tag != 1:
+        raise ValueError(f'invalid Option<u64> tag: {tag}')
+    if pos + 8 > len(data):
+        raise ValueError('metadata ended before Option<u64> value')
+
+    value = struct.unpack('<Q', data[pos:pos+8])[0]
+    pos += 8
+    return value, pos
+
+def _parse_current_consensus_key(metadata_bytes):
+    """Parse just the current_consensus_key from MultiConsensusMetadata."""
+    if not metadata_bytes:
+        return None
+
+    current_consensus_key, _ = _read_optional_u64(metadata_bytes, 0)
+    return current_consensus_key
+
+def _parse_consensus_entry(entry_bytes):
+    """Parse a ConsensusEntry value and return its fields."""
+    if not entry_bytes or len(entry_bytes) < 24:
+        return None
+
+    pos = 0
+    key = struct.unpack('<Q', entry_bytes[pos:pos+8])[0]
+    pos += 8
+    name_len = struct.unpack('<Q', entry_bytes[pos:pos+8])[0]
+    pos += 8
+
+    if pos + name_len + 8 > len(entry_bytes):
+        return None
+
+    directory_name = entry_bytes[pos:pos+name_len].decode('utf-8')
+    pos += name_len
+    creation_timestamp = struct.unpack('<Q', entry_bytes[pos:pos+8])[0]
+
+    return {
+        'key': key,
+        'directory_name': directory_name,
+        'creation_timestamp': creation_timestamp,
+    }
+
+def find_active_consensus_dir(datadir_root):
+    """
+    Resolve the active Rust consensus directory from the meta database.
+    Returns the full consensus path or None if it cannot be determined.
+    Raises ActiveConsensusResolutionError if metadata exists but is unreadable or inconsistent.
+    """
+    if not ROCKSDB_AVAILABLE:
+        return None
+
+    datadir_root = Path(datadir_root).expanduser()
+    meta_dir = datadir_root / 'meta'
+    if not meta_dir.is_dir():
+        return None
+
+    db = None
+    try:
+        db = _open_rocksdb_readonly(meta_dir, max_open_files=64)
+    except Exception as exc:
+        raise ActiveConsensusResolutionError(
+            f'failed to open meta database at {meta_dir}: {exc}'
+        ) from exc
+
+    try:
+
+        metadata_bytes = None
+        for metadata_key in (
+            bytes([DatabaseStorePrefixes.MULTI_CONSENSUS_METADATA]),
+            LEGACY_MULTI_CONSENSUS_METADATA_KEY,
+        ):
+            metadata_bytes = db.get(metadata_key)
+            if metadata_bytes is not None:
+                break
+
+        current_consensus_key = _parse_current_consensus_key(metadata_bytes)
+        if current_consensus_key is None:
+            return None
+
+        current_consensus_key_bytes = current_consensus_key.to_bytes(8, 'little')
+        entry_bytes = None
+        for entry_key in (
+            bytes([DatabaseStorePrefixes.CONSENSUS_ENTRIES]) + current_consensus_key_bytes,
+            LEGACY_CONSENSUS_ENTRIES_PREFIX + current_consensus_key_bytes,
+        ):
+            entry_bytes = db.get(entry_key)
+            if entry_bytes is not None:
+                break
+
+        if entry_bytes is None:
+            raise ActiveConsensusResolutionError(
+                f'active consensus entry {current_consensus_key} not found in {meta_dir}'
+            )
+
+        entry = _parse_consensus_entry(entry_bytes)
+        if not entry:
+            raise ActiveConsensusResolutionError(
+                f'active consensus entry {current_consensus_key} in {meta_dir} is malformed'
+            )
+
+        consensus_dir = datadir_root / 'consensus' / entry['directory_name']
+        if consensus_dir.is_dir():
+            return str(consensus_dir)
+
+        raise ActiveConsensusResolutionError(
+            f'metadata points to missing consensus directory: {consensus_dir}'
+        )
+    except ActiveConsensusResolutionError:
+        raise
+    except Exception as exc:
+        raise ActiveConsensusResolutionError(
+            f'failed to read active consensus metadata from {meta_dir}: {exc}'
+        ) from exc
+    finally:
+        if db is not None:
+            db.close()
 
 class Block:
     """
@@ -177,140 +326,140 @@ class UTXOEntry:
         self.blockDaaScore = utxo_dict.get('blockDaaScore', 0)
         self.isCoinbase = utxo_dict.get('isCoinbase', False)
 
-# Manual bincode deserialization - no struct definition needed
-# The deserialize_bincode_header function handles the parsing directly
+def _decode_blue_work(blue_work_bytes):
+    """Convert little-endian Uint192 bytes to the trimmed big-endian form used by hashing."""
+    blue_work_be = blue_work_bytes[::-1]
+    start = 0
+    for i, byte in enumerate(blue_work_be):
+        if byte != 0:
+            start = i
+            break
+    else:
+        start = len(blue_work_be)
+    return blue_work_be[start:] if start < len(blue_work_be) else b''
 
-def deserialize_bincode_header(data):
+def _parse_common_header_fields(data, pos, parents_by_level):
+    """Parse the common Header fields after the parent list."""
+    hash_merkle_root = data[pos:pos+32]
+    pos += 32
+    accepted_id_merkle_root = data[pos:pos+32]
+    pos += 32
+    utxo_commitment = data[pos:pos+32]
+    pos += 32
+    timestamp = struct.unpack('<Q', data[pos:pos+8])[0]
+    pos += 8
+    bits = struct.unpack('<I', data[pos:pos+4])[0]
+    pos += 4
+    nonce = struct.unpack('<Q', data[pos:pos+8])[0]
+    pos += 8
+    daa_score = struct.unpack('<Q', data[pos:pos+8])[0]
+    pos += 8
+    blue_work = _decode_blue_work(data[pos:pos+24])
+    pos += 24
+    blue_score = struct.unpack('<Q', data[pos:pos+8])[0]
+    pos += 8
+    pruning_point = data[pos:pos+32]
+    pos += 32
+
+    header_dict = {
+        'hashMerkleRoot': hash_merkle_root,
+        'acceptedIDMerkleRoot': accepted_id_merkle_root,
+        'utxoCommitment': utxo_commitment,
+        'pruningPoint': pruning_point,
+        'timeInMilliseconds': timestamp,
+        'bits': bits,
+        'nonce': nonce,
+        'daaScore': daa_score,
+        'blueWork': blue_work,
+        'blueScore': blue_score,
+        'parents': parents_by_level,
+    }
+    return header_dict, pos
+
+def deserialize_bincode_header_legacy(data):
+    """Deserialize the legacy Header format with Vec<Vec<Hash>> parents."""
+    pos = 0
+    pos += 32  # Skip cached hash
+    version = struct.unpack('<H', data[pos:pos+2])[0]
+    pos += 2
+
+    parents_outer_len = struct.unpack('<Q', data[pos:pos+8])[0]
+    pos += 8
+    parents_by_level = []
+    for _ in range(parents_outer_len):
+        inner_len = struct.unpack('<Q', data[pos:pos+8])[0]
+        pos += 8
+        inner_hashes = []
+        for _ in range(inner_len):
+            inner_hashes.append(data[pos:pos+32])
+            pos += 32
+        parents_by_level.append(inner_hashes)
+
+    header_dict, _ = _parse_common_header_fields(data, pos, parents_by_level)
+    header_dict['version'] = version
+    return HeaderData(header_dict)
+
+def deserialize_bincode_header_compressed(data):
+    """Deserialize the current HeaderWithBlockLevel format with compressed parents."""
+    pos = 0
+    pos += 32  # Skip cached hash
+    version = struct.unpack('<H', data[pos:pos+2])[0]
+    pos += 2
+
+    runs_len = struct.unpack('<Q', data[pos:pos+8])[0]
+    pos += 8
+    compressed_runs = []
+    for _ in range(runs_len):
+        cumulative_levels = data[pos]
+        pos += 1
+        inner_len = struct.unpack('<Q', data[pos:pos+8])[0]
+        pos += 8
+        inner_hashes = []
+        for _ in range(inner_len):
+            inner_hashes.append(data[pos:pos+32])
+            pos += 32
+        compressed_runs.append((cumulative_levels, inner_hashes))
+
+    parents_by_level = []
+    previous_level = 0
+    for cumulative_levels, level_hashes in compressed_runs:
+        while previous_level < cumulative_levels:
+            parents_by_level.append(level_hashes)
+            previous_level += 1
+
+    header_dict, pos = _parse_common_header_fields(data, pos, parents_by_level)
+    header_dict['version'] = version
+
+    if pos < len(data):
+        # The remaining byte is the serialized block level from HeaderWithBlockLevel.
+        pos += 1
+
+    return HeaderData(header_dict)
+
+def deserialize_bincode_header(data, header_format='auto'):
     """
-    Deserialize bincode header data using manual parsing
-    
-    This deserializes the Rust Header struct serialized with bincode.
-    The format matches exactly what Rust bincode produces:
-    - Fixed-size arrays (Hash) are serialized directly without length prefix
-    - u16/u32/u64 are serialized as little-endian integers
-    - Vec<T> has 8-byte length prefix followed by elements
+    Deserialize Rust header data from either the current compressed format
+    or the legacy uncompressed format.
     """
-    if not data or len(data) < 100:  # Headers should be much larger
+    if not data or len(data) < 100:
         return None
-    
-    try:
-        pos = 0
-        
-        # Parse according to Rust Header struct order:
-        # pub struct Header {
-        #     pub hash: Hash,                     // [u8; 32]
-        #     pub version: u16,                   // 2 bytes
-        #     pub parents_by_level: Vec<Vec<Hash>>, // 8-byte len + nested vecs
-        #     pub hash_merkle_root: Hash,         // [u8; 32]
-        #     pub accepted_id_merkle_root: Hash,  // [u8; 32]
-        #     pub utxo_commitment: Hash,          // [u8; 32]
-        #     pub timestamp: u64,                 // 8 bytes
-        #     pub bits: u32,                      // 4 bytes
-        #     pub nonce: u64,                     // 8 bytes
-        #     pub daa_score: u64,                 // 8 bytes
-        #     pub blue_work: BlueWorkType,        // Uint192 = 24 bytes
-        #     pub blue_score: u64,                // 8 bytes
-        #     pub pruning_point: Hash,            // [u8; 32]
-        # }
-        
-        # 1. hash: Hash ([u8; 32])
-        hash_bytes = data[pos:pos+32]
-        pos += 32
-        
-        # 2. version: u16 (2 bytes, little-endian)
-        version = struct.unpack('<H', data[pos:pos+2])[0]
-        pos += 2
-        
-        # 3. parents_by_level: Vec<Vec<Hash>> (8-byte len + nested structure)
-        parents_outer_len = struct.unpack('<Q', data[pos:pos+8])[0]
-        pos += 8
-        
-        parents_by_level = []
-        for _ in range(parents_outer_len):
-            # Each inner Vec<Hash> also has 8-byte length
-            inner_len = struct.unpack('<Q', data[pos:pos+8])[0]
-            pos += 8
-            inner_hashes = []
-            for _ in range(inner_len):
-                inner_hash = data[pos:pos+32]
-                inner_hashes.append(inner_hash)
-                pos += 32
-            parents_by_level.append(inner_hashes)
-        
-        # 4. hash_merkle_root: Hash ([u8; 32])
-        hash_merkle_root = data[pos:pos+32]
-        pos += 32
-        
-        # 5. accepted_id_merkle_root: Hash ([u8; 32])
-        accepted_id_merkle_root = data[pos:pos+32]
-        pos += 32
-        
-        # 6. utxo_commitment: Hash ([u8; 32])
-        utxo_commitment = data[pos:pos+32]
-        pos += 32
-        
-        # 7. timestamp: u64 (8 bytes, little-endian)
-        timestamp = struct.unpack('<Q', data[pos:pos+8])[0]
-        pos += 8
-        
-        # 8. bits: u32 (4 bytes, little-endian)
-        bits = struct.unpack('<I', data[pos:pos+4])[0]
-        pos += 4
-        
-        # 9. nonce: u64 (8 bytes, little-endian)
-        nonce = struct.unpack('<Q', data[pos:pos+8])[0]
-        pos += 8
-        
-        # 10. daa_score: u64 (8 bytes, little-endian)
-        daa_score = struct.unpack('<Q', data[pos:pos+8])[0]
-        pos += 8
-        
-        # 11. blue_work: BlueWorkType (Uint192 = 24 bytes, little-endian in storage)
-        blue_work_bytes = data[pos:pos+24]
-        pos += 24
-        
-        # Convert to big-endian and trim leading zeros for hashing compatibility
-        # This matches how Go handles BlueWork
-        blue_work_be = blue_work_bytes[::-1]  # Convert from little-endian to big-endian
-        # Find first non-zero byte
-        start = 0
-        for i, byte in enumerate(blue_work_be):
-            if byte != 0:
-                start = i
-                break
-        else:
-            start = len(blue_work_be)  # All zeros
-        blue_work = blue_work_be[start:] if start < len(blue_work_be) else b''
-        
-        # 12. blue_score: u64 (8 bytes, little-endian)
-        blue_score = struct.unpack('<Q', data[pos:pos+8])[0]
-        pos += 8
-        
-        # 13. pruning_point: Hash ([u8; 32])
-        pruning_point = data[pos:pos+32]
-        pos += 32
-        
-        # Convert to our HeaderData format
-        header_dict = {
-            'hashMerkleRoot': hash_merkle_root,
-            'acceptedIDMerkleRoot': accepted_id_merkle_root,
-            'utxoCommitment': utxo_commitment,
-            'pruningPoint': pruning_point,
-            'timeInMilliseconds': timestamp,
-            'bits': bits,
-            'nonce': nonce,
-            'daaScore': daa_score,
-            'blueWork': blue_work,
-            'blueScore': blue_score,
-            'version': version,
-            'parents': parents_by_level
-        }
-        
-        return HeaderData(header_dict)
-        
-    except Exception as e:
-        print(f"Manual bincode header deserialization failed: {e}")
-        return None
+
+    parser_sets = {
+        'auto': (deserialize_bincode_header_compressed, deserialize_bincode_header_legacy),
+        'compressed': (deserialize_bincode_header_compressed,),
+        'legacy': (deserialize_bincode_header_legacy,),
+    }
+    parsers = parser_sets.get(header_format)
+    if parsers is None:
+        raise ValueError(f'Unknown header format: {header_format}')
+
+    for parser in parsers:
+        try:
+            return parser(data)
+        except Exception:
+            continue
+
+    return None
 
 class Store:
     """
@@ -329,9 +478,9 @@ class Store:
                 # Unlike Go-based kaspad, Rust-based kaspa allows opening DB while node is running
                 if read_only:
                     # Open in read-only mode to avoid conflicts with running node
-                    self.db = rocksdict.Rdict(db_path, access_type=rocksdict.AccessType.read_only())
+                    self.db = _open_rocksdb_readonly(db_path)
                 else:
-                    self.db = rocksdict.Rdict(db_path)
+                    self.db = rocksdict.Rdict(db_path, options=_create_rocksdb_options())
                 self.db_available = True
             except Exception as e:
                 print(f"Failed to open RocksDB: {e}")
@@ -404,16 +553,25 @@ class Store:
         if not self.db_available or self.db is None:
             print("Database not available - cannot read header data")
             return None
-            
-        key = self._build_key(DatabaseStorePrefixes.HEADERS, block_hash)
-        header_bytes = self.db.get(key)
-        
+
+        header_bytes = None
+        header_format = None
+        for prefix, format_name in (
+            (DatabaseStorePrefixes.COMPRESSED_HEADERS, 'compressed'),
+            (DatabaseStorePrefixes.HEADERS, 'legacy'),
+        ):
+            key = self._build_key(prefix, block_hash)
+            header_bytes = self.db.get(key)
+            if header_bytes is not None:
+                header_format = format_name
+                break
+
         if header_bytes is None:
             return None
-        
-        # Try to deserialize with manual bincode parser
+
+        # Parse using the format implied by the store prefix to avoid hanging on legacy bytes.
         try:
-            header_data = deserialize_bincode_header(header_bytes)
+            header_data = deserialize_bincode_header(header_bytes, header_format=header_format)
             if header_data:
                 # Convert HeaderData to RawHeader format for compatibility
                 class ParsedHeader:

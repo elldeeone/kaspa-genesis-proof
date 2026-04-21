@@ -44,6 +44,53 @@ def print_info(text):
     """Print info message"""
     print(f"{Colors.GREEN}→ {text}{Colors.END}")
 
+def resolve_rust_datadir(datadir):
+    """Resolve the Rust consensus database directory from a rusty-kaspa datadir."""
+    resolved = Path(datadir).expanduser()
+
+    # Allow passing the consensus directory directly, e.g. .../consensus/consensus-002
+    if resolved.name.startswith('consensus-') and resolved.is_dir():
+        return str(resolved)
+
+    # Prefer the same active-consensus metadata that rusty-kaspa itself uses.
+    verification_dir = Path(__file__).resolve().parent / 'verification'
+    if str(verification_dir) not in sys.path:
+        sys.path.insert(0, str(verification_dir))
+    from store_rust import ActiveConsensusResolutionError, find_active_consensus_dir
+
+    metadata_error = None
+    try:
+        consensus_dir = find_active_consensus_dir(str(resolved))
+        if consensus_dir is not None:
+            return consensus_dir
+    except ActiveConsensusResolutionError as exc:
+        metadata_error = exc
+
+    consensus_root = resolved / 'consensus'
+    if not consensus_root.is_dir():
+        if metadata_error is not None:
+            raise ValueError(str(metadata_error)) from metadata_error
+        return None
+
+    candidates = sorted(
+        path for path in consensus_root.iterdir()
+        if path.is_dir() and path.name.startswith('consensus-')
+    )
+
+    if len(candidates) == 1:
+        return str(candidates[0])
+
+    if metadata_error is not None:
+        raise ValueError(str(metadata_error)) from metadata_error
+
+    if len(candidates) > 1:
+        raise ValueError(
+            f"Found multiple consensus directories under {consensus_root}; "
+            "could not determine the active one from metadata"
+        )
+
+    return None
+
 def transaction_hash(t):
     """Calculate transaction hash using Kaspa's algorithm"""
     hasher = hashlib.blake2b(digest_size=32, key=b"TransactionHash")
@@ -188,6 +235,9 @@ def verify_genesis(node_type, datadir, pre_checkpoint_datadir=None, verbose=Fals
         # Step 1: Open current database
         print_header("Step 1: Database Connectivity Test")
         current_store = Store(datadir)
+        if hasattr(current_store, 'db_available') and not current_store.db_available:
+            print_error("Current database could not be opened")
+            return False
         print_success("Current database opened successfully")
         
         # Step 2: Get current tips and verify connectivity
@@ -461,16 +511,22 @@ Examples:
         print_error(f"Data directory not found: {datadir}")
         sys.exit(1)
     
-    # For Rust nodes, append the consensus subdirectory
-    if args.node_type == 'rust' and not datadir.endswith('consensus-003'):
-        consensus_dir = os.path.join(datadir, 'consensus', 'consensus-003')
-        if os.path.exists(consensus_dir):
-            datadir = consensus_dir
-        else:
-            print_error(f"Consensus directory not found: {consensus_dir}")
-            print_info("Make sure your Rust node is fully synced")
+    # For Rust nodes, resolve the consensus subdirectory dynamically
+    if args.node_type == 'rust':
+        try:
+            resolved_datadir = resolve_rust_datadir(datadir)
+        except ValueError as exc:
+            print_error(f"Unable to resolve Rust consensus directory from: {datadir}")
+            print_info(str(exc))
             sys.exit(1)
-    
+        if resolved_datadir is None:
+            consensus_root = os.path.join(datadir, 'consensus')
+            print_error(f"Unable to resolve Rust consensus directory from: {datadir}")
+            print_info("Pass the root rusty-kaspa datadir or the full consensus path")
+            print_info(f"Expected a single consensus-* directory under: {consensus_root}")
+            sys.exit(1)
+        datadir = resolved_datadir
+
     print(f"{Colors.BOLD}Kaspa Genesis Proof Verification{Colors.END}")
     print(f"Node type: {args.node_type}")
     print(f"Data directory: {datadir}")
