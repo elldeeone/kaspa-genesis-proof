@@ -1305,6 +1305,23 @@ mod tests {
     }
 
     #[test]
+    fn resolve_rust_db_path_errors_when_current_consensus_entry_is_missing() {
+        let (_tempdir, datadir, _consensus_root) = create_temp_datadir();
+
+        create_meta_db(
+            &datadir.join("meta"),
+            &[(vec![124u8], encode_option_u64(Some(7)))],
+        );
+
+        let err = resolve_rust_db_path(&datadir)
+            .expect_err("missing metadata-selected consensus entry should fail");
+        let err_text = format!("{err:#}");
+
+        assert!(err_text.contains("current consensus key 7"));
+        assert!(err_text.contains("no matching consensus entry"));
+    }
+
+    #[test]
     fn hardwired_genesis_coinbase_tx_hash_matches_live_node_merkle_root() {
         let tx = hardwired_genesis_coinbase_tx().expect("hardwired tx");
         let tx_hash = transaction_hash(&tx, true);
@@ -1480,6 +1497,21 @@ mod tests {
     }
 
     #[test]
+    fn rust_store_open_rejects_db_without_headers_selected_tip_key() {
+        let (_tempdir, _datadir, consensus_root) = create_temp_datadir();
+        let db_path = consensus_root.join("consensus-002");
+
+        create_consensus_db(&db_path, &[]);
+
+        let err = RustStore::open(&db_path)
+            .expect_err("db without rust headers selected tip key should be rejected");
+        let err_text = format!("{err:#}");
+
+        assert!(err_text.contains("not a valid rusty-kaspa consensus DB"));
+        assert!(err_text.contains("missing headers selected tip key"));
+    }
+
+    #[test]
     fn rocksdb_read_only_open_files_limit_stays_bounded_for_live_nodes() {
         assert_eq!(ROCKSDB_READ_ONLY_MAX_OPEN_FILES, 128);
         assert!(ROCKSDB_READ_ONLY_MAX_OPEN_FILES > 0);
@@ -1550,6 +1582,51 @@ mod tests {
     }
 
     #[test]
+    fn go_store_open_prefers_datadir2_over_datadir() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let root = tempdir.path().join("go-node");
+        let active_prefix = 1u8;
+        let stale_tip = test_hash(0x11);
+        let active_tip = test_hash(0x22);
+
+        create_go_leveldb(
+            &root.join("kaspa-mainnet").join("datadir"),
+            &[
+                (b"active-prefix".to_vec(), vec![active_prefix]),
+                (
+                    go_bucketed_key(active_prefix, b"headers-selected-tip", None),
+                    encode_db_hash(stale_tip),
+                ),
+                (
+                    go_bucketed_key(active_prefix, b"tips", None),
+                    encode_db_tips(&[stale_tip]),
+                ),
+            ],
+        );
+        create_go_leveldb(
+            &root.join("kaspa-mainnet").join("datadir2"),
+            &[
+                (b"active-prefix".to_vec(), vec![active_prefix]),
+                (
+                    go_bucketed_key(active_prefix, b"headers-selected-tip", None),
+                    encode_db_hash(active_tip),
+                ),
+                (
+                    go_bucketed_key(active_prefix, b"tips", None),
+                    encode_db_tips(&[active_tip]),
+                ),
+            ],
+        );
+
+        let mut store = GoStore::open(&root.join("kaspa-mainnet")).expect("open go store");
+        let (tips, hst) = store.tips().expect("tips");
+
+        assert_eq!(store.db_path, root.join("kaspa-mainnet").join("datadir2"));
+        assert_eq!(hst, active_tip);
+        assert_eq!(tips, vec![active_tip]);
+    }
+
+    #[test]
     fn go_store_tips_falls_back_to_selected_tip_when_proto_tip_set_is_empty() {
         let tempdir = TempDir::new().expect("tempdir");
         let db_path = tempdir.path().join("datadir2");
@@ -1576,6 +1653,46 @@ mod tests {
 
         assert_eq!(hst, selected_tip);
         assert_eq!(tips, vec![selected_tip]);
+    }
+
+    #[test]
+    fn auto_detect_prefers_go_store_for_go_leveldb_datadir() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let db_path = tempdir.path().join("datadir2");
+        let active_prefix = 1u8;
+        let selected_tip = test_hash(0x6b);
+
+        create_go_leveldb(
+            &db_path,
+            &[
+                (b"active-prefix".to_vec(), vec![active_prefix]),
+                (
+                    go_bucketed_key(active_prefix, b"headers-selected-tip", None),
+                    encode_db_hash(selected_tip),
+                ),
+                (
+                    go_bucketed_key(active_prefix, b"tips", None),
+                    encode_db_tips(&[selected_tip]),
+                ),
+            ],
+        );
+
+        let cli = Cli {
+            node_type: CliNodeType::Auto,
+            datadir: Some(db_path.clone()),
+            json_out: None,
+            verbose: false,
+            no_input: true,
+            pause_on_exit: false,
+        };
+
+        let result = open_store_with_resolved_input(&cli).expect("auto-detect store");
+
+        assert_eq!(
+            result.store.store_name(),
+            "Go node store (LevelDB + Protobuf)"
+        );
+        assert_eq!(result.store.resolved_db_path(), db_path.as_path());
     }
 
     #[test]

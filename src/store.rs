@@ -21,6 +21,7 @@ impl RustStore {
     pub(crate) fn open(input_path: &Path) -> Result<Self> {
         let resolution = resolve_rust_db_path(input_path)?;
         let db = open_rocksdb_read_only(&resolution.active_consensus_db_path)?;
+        validate_rust_consensus_db(&db, &resolution.active_consensus_db_path)?;
         Ok(Self { db, resolution })
     }
 }
@@ -373,6 +374,31 @@ fn open_rocksdb_read_only(path: &Path) -> Result<RocksDb> {
         .with_context(|| format!("failed opening RocksDB at {}", path.display()))
 }
 
+fn validate_rust_consensus_db(db: &RocksDb, path: &Path) -> Result<()> {
+    let Some(headers_selected_tip_bytes) = db.get([7u8]).with_context(|| {
+        format!(
+            "reading rust headers selected tip key from {}",
+            path.display()
+        )
+    })?
+    else {
+        bail!(
+            "{} is not a valid rusty-kaspa consensus DB: missing headers selected tip key",
+            path.display()
+        );
+    };
+
+    if headers_selected_tip_bytes.len() < 32 {
+        bail!(
+            "{} is not a valid rusty-kaspa consensus DB: headers selected tip value is too short ({})",
+            path.display(),
+            headers_selected_tip_bytes.len()
+        );
+    }
+
+    Ok(())
+}
+
 fn is_db_dir(path: &Path) -> bool {
     path.join("CURRENT").is_file()
 }
@@ -544,6 +570,7 @@ pub(crate) fn resolve_rust_db_path(input_path: &Path) -> Result<RustDbResolution
     }
 
     let mut active_dir_name: Option<String> = None;
+    let mut metadata_current_key: Option<u64> = None;
     let mut detected_layout = "rust-consensus-directory-fallback".to_string();
 
     if let Some(meta_path) = meta_path {
@@ -569,7 +596,16 @@ pub(crate) fn resolve_rust_db_path(input_path: &Path) -> Result<RustDbResolution
                     if let Some(bytes) = metadata_bytes {
                         match parse_current_consensus_key(&bytes) {
                             Ok(Some(k)) => {
-                                active_dir_name = read_consensus_entry_dir_name(&meta_db, k)?;
+                                metadata_current_key = Some(k);
+                                active_dir_name = Some(
+                                    read_consensus_entry_dir_name(&meta_db, k)?.ok_or_else(
+                                        || {
+                                            anyhow!(
+                                                "multi-consensus metadata referenced current consensus key {k}, but no matching consensus entry was found"
+                                            )
+                                        },
+                                    )?,
+                                );
                                 detected_layout = "rust-meta-managed".to_string();
                             }
                             Ok(None) => {
@@ -616,16 +652,27 @@ pub(crate) fn resolve_rust_db_path(input_path: &Path) -> Result<RustDbResolution
         });
     }
 
-    let active_consensus_db_path = active_dir_name
-        .as_ref()
-        .map(|name| consensus_root.join(name))
-        .filter(|p| p.is_dir())
-        .ok_or_else(|| {
-            anyhow!(
-                "could not resolve active consensus directory under {}",
-                consensus_root.display()
-            )
-        })?;
+    let active_dir_name = active_dir_name.ok_or_else(|| {
+        anyhow!(
+            "could not resolve active consensus directory under {}",
+            consensus_root.display()
+        )
+    })?;
+    let active_consensus_db_path = consensus_root.join(&active_dir_name);
+
+    if !active_consensus_db_path.is_dir() {
+        if let Some(current_key) = metadata_current_key {
+            bail!(
+                "multi-consensus metadata referenced current consensus key {current_key} with directory '{active_dir_name}', but {} does not exist",
+                active_consensus_db_path.display()
+            );
+        }
+
+        bail!(
+            "could not resolve active consensus directory under {}",
+            consensus_root.display()
+        );
+    }
 
     notes.push(format!("Detected layout: {detected_layout}"));
     notes.push(format!(
@@ -783,14 +830,22 @@ fn default_datadir_probe_candidates() -> Vec<PathBuf> {
 
 fn candidate_go_db_paths(input_path: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
 
-    out.push(input_path.to_path_buf());
-    out.push(input_path.join("datadir2"));
-    out.push(input_path.join("datadir"));
-    out.push(input_path.join("kaspa-mainnet").join("datadir2"));
-    out.push(input_path.join("kaspa-mainnet").join("datadir"));
+    let mut push = |path: PathBuf| {
+        if seen.insert(path.clone()) {
+            out.push(path);
+        }
+    };
+
+    push(input_path.to_path_buf());
+    push(input_path.join("datadir2"));
+    push(input_path.join("datadir"));
+    push(input_path.join("kaspa-mainnet").join("datadir2"));
+    push(input_path.join("kaspa-mainnet").join("datadir"));
 
     if input_path.is_dir() {
+        let mut child_dirs = Vec::new();
         for entry in fs::read_dir(input_path)
             .with_context(|| format!("failed reading directory {}", input_path.display()))?
         {
@@ -800,13 +855,16 @@ fn candidate_go_db_paths(input_path: &Path) -> Result<Vec<PathBuf>> {
             if !path.is_dir() {
                 continue;
             }
-            out.push(path.join("datadir2"));
-            out.push(path.join("datadir"));
+            child_dirs.push(path);
+        }
+
+        child_dirs.sort();
+        for path in child_dirs {
+            push(path.join("datadir2"));
+            push(path.join("datadir"));
         }
     }
 
-    out.sort();
-    out.dedup();
     Ok(out)
 }
 
