@@ -7,14 +7,16 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::hashing::{
+    decode_rust_header, decode_tip_hash_from_key_suffix, hash32_from_hex, to_hash32,
+};
 use crate::output::print_info;
 use crate::{
     CHECKPOINT_DATA_JSON, CheckpointJson, CheckpointStore, Cli, CliNodeType, ConsensusEntry,
     GoStore, Hash32, HeaderSource, HeaderStore, LEGACY_CONSENSUS_ENTRIES_PREFIX,
     LEGACY_MULTI_CONSENSUS_METADATA_KEY, MultiConsensusMetadata, OpenStoreResult, ParsedHeader,
     ROCKSDB_READ_ONLY_MAX_OPEN_FILES, RUST_CONSENSUS_ENTRY_PREFIX,
-    RUST_MULTI_CONSENSUS_METADATA_KEY, RustDbResolution, RustStore, decode_rust_header,
-    decode_tip_hash_from_key_suffix, hash32_from_hex, proto, to_hash32,
+    RUST_MULTI_CONSENSUS_METADATA_KEY, RustDbResolution, RustStore, proto,
 };
 
 impl RustStore {
