@@ -40,10 +40,12 @@ Non-interactive run with JSON output:
 ./target/release/rust-native-verifier --no-input --json-out ./kaspa-proof-report.json
 ```
 
-If you are using a release archive instead of building from source:
+If you downloaded and extracted a release archive, the launcher scripts are at the archive root:
 
 - macOS/Linux: run `./run-verifier.sh`
 - Windows: run `run-verifier.bat`
+
+In this source repository, those launcher scripts live under `dist/` and are copied into the release archive during packaging.
 
 ## Independent Verification Inputs
 
