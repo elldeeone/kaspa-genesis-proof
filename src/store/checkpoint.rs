@@ -19,7 +19,7 @@ impl HeaderSource for CheckpointStore {
 impl CheckpointStore {
     pub(crate) fn from_embedded_json() -> Result<Self> {
         let parsed: CheckpointJson = serde_json::from_str(CHECKPOINT_DATA_JSON)
-            .context("failed parsing embedded checkpoint_data.json")?;
+            .context("failed parsing embedded resources/checkpoint_data.json")?;
 
         let mut headers = HashMap::with_capacity(parsed.headers_chain.len());
         for entry in parsed.headers_chain {

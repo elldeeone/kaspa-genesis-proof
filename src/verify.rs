@@ -444,7 +444,7 @@ where
         print_info(
             "Trust model: embedded pre-checkpoint data by default (override with --pre-checkpoint-datadir PATH)",
         );
-        print_success("Loaded embedded checkpoint_data.json");
+        print_success("Loaded embedded resources/checkpoint_data.json");
         print_info("(No 1GB pre-checkpoint database download required)");
         PreCheckpointSource::Embedded(store)
     };

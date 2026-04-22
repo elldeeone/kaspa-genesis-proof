@@ -49,7 +49,7 @@ If you are using a release archive instead of building from source:
 
 Default mode uses embedded verification data:
 
-- embedded `checkpoint_data.json`
+- embedded `resources/checkpoint_data.json`
 - embedded canonical `kaspad v0.11.5-2` `utxos.gz`
 
 If you want to supply your own inputs, use:
