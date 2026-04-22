@@ -128,6 +128,7 @@ fn hardwired_genesis_header_hash_matches_live_node_hash() {
 }
 
 #[test]
+#[ignore = "deep-ci: runs full proof verification path"]
 fn verify_genesis_succeeds_for_hardwired_mode() {
     clear_output_capture();
     let tip_time = now_millis().expect("now");
@@ -170,6 +171,7 @@ fn verify_genesis_succeeds_for_hardwired_mode() {
 }
 
 #[test]
+#[ignore = "deep-ci: runs full proof verification path"]
 fn verify_genesis_succeeds_for_original_mode() {
     clear_output_capture();
     let tip_time = now_millis().expect("now");
@@ -204,6 +206,7 @@ fn verify_genesis_succeeds_for_original_mode() {
 }
 
 #[test]
+#[ignore = "deep-ci: runs full proof verification path"]
 fn verify_genesis_accepts_external_pre_checkpoint_store() {
     clear_output_capture();
     let tempdir = tempfile::TempDir::new().expect("tempdir");
@@ -238,6 +241,7 @@ fn verify_genesis_accepts_external_pre_checkpoint_store() {
 }
 
 #[test]
+#[ignore = "deep-ci: runs full proof verification path"]
 fn verify_genesis_prefers_real_dag_tip_over_headers_selected_tip() {
     clear_output_capture();
     let tip_time = now_millis().expect("now");
@@ -289,6 +293,7 @@ fn verify_genesis_prefers_real_dag_tip_over_headers_selected_tip() {
 }
 
 #[test]
+#[ignore = "deep-ci: runs full proof verification path"]
 fn verify_genesis_uses_real_chain_tip_for_sync_age_when_hst_is_stale() {
     clear_output_capture();
     let fresh_tip_time = now_millis().expect("now");
@@ -339,6 +344,7 @@ fn verify_genesis_uses_real_chain_tip_for_sync_age_when_hst_is_stale() {
 }
 
 #[test]
+#[ignore = "deep-ci: runs full proof verification path"]
 fn verify_genesis_uses_real_chain_tip_for_sync_warning_when_hst_is_fresh() {
     clear_output_capture();
     let fresh_hst_time = now_millis().expect("now");
@@ -395,6 +401,7 @@ fn verify_genesis_uses_real_chain_tip_for_sync_warning_when_hst_is_fresh() {
 }
 
 #[test]
+#[ignore = "deep-ci: runs full proof verification path"]
 fn verify_genesis_records_sync_warning_and_continues_without_prompt() {
     clear_output_capture();
     let stale_tip_time = now_millis()
@@ -439,6 +446,7 @@ fn verify_genesis_records_sync_warning_and_continues_without_prompt() {
 }
 
 #[test]
+#[ignore = "deep-ci: runs full proof verification path"]
 fn verify_genesis_sync_warning_never_aborts_proof_flow() {
     clear_output_capture();
     let stale_tip_time = now_millis()

@@ -8,6 +8,7 @@ use tempfile::TempDir;
 use support::{create_go_fixture, run_binary, stdout_text};
 
 #[test]
+#[ignore = "deep-ci: runs full binary verification flow"]
 fn binary_writes_json_report_for_go_fixture() {
     let tempdir = TempDir::new().expect("tempdir");
     let fixture = create_go_fixture(&tempdir, false);
@@ -96,6 +97,7 @@ fn binary_writes_json_report_for_go_fixture() {
 }
 
 #[test]
+#[ignore = "deep-ci: runs full binary verification flow"]
 fn binary_no_input_skips_prompts_and_does_not_auto_export_json() {
     let tempdir = TempDir::new().expect("tempdir");
     let fixture = create_go_fixture(&tempdir, true);

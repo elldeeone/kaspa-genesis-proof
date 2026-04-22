@@ -1,5 +1,11 @@
 name: Rust Native Verify
-description: Run formatter, clippy, and the full Rust verifier test suite.
+description: Run formatter, clippy, and the Rust verifier test suite.
+
+inputs:
+  deep-tests:
+    description: Run ignored deep proof and CLI verification tests.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -20,6 +26,11 @@ runs:
       shell: bash
       run: cargo clippy --all-targets --all-features -- -D warnings
 
-    - name: Run test suite
+    - name: Run fast test suite
       shell: bash
       run: cargo test --locked
+
+    - name: Run deep test suite
+      if: ${{ inputs.deep-tests == 'true' }}
+      shell: bash
+      run: cargo test --locked -- --ignored

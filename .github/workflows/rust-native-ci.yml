@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - main
-      - rust-native
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -16,14 +15,17 @@ permissions:
 
 jobs:
   verify:
+    name: Verify (${{ github.event_name == 'pull_request' && 'deep' || 'fast' }})
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Run full verification suite
+      - name: Run verification suite
         uses: ./.github/actions/rust-native-verify
+        with:
+          deep-tests: ${{ github.event_name == 'pull_request' && 'true' || 'false' }}
 
   build-matrix:
     if: github.event_name == 'pull_request'
