@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - "rust-native-v*"
+      - "v*"
 
 permissions:
   contents: write
