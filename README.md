@@ -40,6 +40,11 @@ pip install -r requirements.txt
 # Or manually: pip install numpy pandas rocksdict tqdm notebook
 ```
 
+If you want to use `--pre-checkpoint-datadir` or read Go-format snapshots, also install:
+```bash
+pip install plyvel protobuf==3.20.0
+```
+
 **For Go-based kaspad nodes:**
 ```bash
 pip install numpy pandas plyvel protobuf==3.20.0 tqdm notebook
@@ -80,6 +85,7 @@ kaspa-genesis-proof/
 │   ├── genesis_proof.ipynb           # Interactive verification notebook
 │   ├── store_rust.py                 # RocksDB + Bincode support for Rust nodes
 │   ├── store_checkpoint.py           # Optimized checkpoint data reader
+│   ├── dbobjects_pb2.py              # Canonical Go protobuf definitions
 │   ├── checkpoint_data.json          # Pre-extracted headers (avoids 1GB download)
 │   └── store.py                      # LevelDB + Protobuf support for Go nodes
 └── docs/

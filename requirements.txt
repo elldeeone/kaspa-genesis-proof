@@ -1,5 +1,8 @@
 # Dependencies for kaspa-genesis-proof verification
 # For Rust-based rusty-kaspa nodes
+# For Go-format snapshots / --pre-checkpoint-datadir support, also install:
+#   plyvel
+#   protobuf==3.20.0
 numpy
 pandas
 rocksdict
