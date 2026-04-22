@@ -21,23 +21,23 @@ cargo build --release
 Run:
 
 ```bash
-./target/release/rust-native-verifier
+./target/release/genesis-proof
 ```
 
 Run with an explicit datadir:
 
 ```bash
 # rusty-kaspa
-./target/release/rust-native-verifier --node-type rust --datadir ~/.rusty-kaspa/kaspa-mainnet/datadir
+./target/release/genesis-proof --node-type rust --datadir ~/.rusty-kaspa/kaspa-mainnet/datadir
 
 # kaspad
-./target/release/rust-native-verifier --node-type go --datadir ~/.kaspad/kaspa-mainnet/datadir2
+./target/release/genesis-proof --node-type go --datadir ~/.kaspad/kaspa-mainnet/datadir2
 ```
 
 Non-interactive run with JSON output:
 
 ```bash
-./target/release/rust-native-verifier --no-input --json-out ./kaspa-proof-report.json
+./target/release/genesis-proof --no-input --json-out ./kaspa-proof-report.json
 ```
 
 If you downloaded and extracted a release archive, the launcher scripts are at the archive root:
@@ -57,7 +57,7 @@ Default mode uses embedded verification data:
 If you want to supply your own inputs, use:
 
 ```bash
-./target/release/rust-native-verifier \
+./target/release/genesis-proof \
   --pre-checkpoint-datadir /path/to/datadir2 \
   --checkpoint-utxos-gz /path/to/utxos.gz
 ```
@@ -82,7 +82,7 @@ The checkpoint total reported by the verifier is:
 
 ## Releases
 
-Prebuilt artifacts are published by `.github/workflows/rust-native-release.yml` for:
+Prebuilt artifacts are published by the release workflow for:
 
 - Linux x86_64
 - macOS x86_64

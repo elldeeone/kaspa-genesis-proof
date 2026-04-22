@@ -1,4 +1,4 @@
-name: rust-native-verifier-release
+name: genesis-proof-release
 
 on:
   workflow_dispatch:
@@ -34,22 +34,22 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_suffix: linux-x86_64
-            binary_name: rust-native-verifier
+            binary_name: genesis-proof
             archive_ext: tar.gz
           - os: macos-13
             target: x86_64-apple-darwin
             artifact_suffix: macos-x86_64
-            binary_name: rust-native-verifier
+            binary_name: genesis-proof
             archive_ext: tar.gz
           - os: macos-14
             target: aarch64-apple-darwin
             artifact_suffix: macos-aarch64
-            binary_name: rust-native-verifier
+            binary_name: genesis-proof
             archive_ext: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_suffix: windows-x86_64
-            binary_name: rust-native-verifier.exe
+            binary_name: genesis-proof.exe
             archive_ext: zip
 
     steps:
@@ -69,14 +69,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          PKG_DIR="kaspa-genesis-proof-rust-native-${{ matrix.artifact_suffix }}"
+          PKG_DIR="genesis-proof-${{ matrix.artifact_suffix }}"
           mkdir -p "$PKG_DIR"
 
           cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "$PKG_DIR/"
           cp "dist/run-verifier.sh" "$PKG_DIR/"
           cp "dist/README-RUN.txt" "$PKG_DIR/"
 
-          chmod +x "$PKG_DIR/rust-native-verifier"
+          chmod +x "$PKG_DIR/genesis-proof"
           chmod +x "$PKG_DIR/run-verifier.sh"
 
           tar -czf "${PKG_DIR}.tar.gz" "$PKG_DIR"
@@ -85,7 +85,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $pkgDir = "kaspa-genesis-proof-rust-native-${{ matrix.artifact_suffix }}"
+          $pkgDir = "genesis-proof-${{ matrix.artifact_suffix }}"
           New-Item -ItemType Directory -Path $pkgDir | Out-Null
 
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "$pkgDir/"
@@ -97,8 +97,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
-          name: rust-native-verifier-${{ matrix.artifact_suffix }}
-          path: kaspa-genesis-proof-rust-native-${{ matrix.artifact_suffix }}.${{ matrix.archive_ext }}
+          name: genesis-proof-${{ matrix.artifact_suffix }}
+          path: genesis-proof-${{ matrix.artifact_suffix }}.${{ matrix.archive_ext }}
 
   release:
     name: Publish GitHub Release

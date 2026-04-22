@@ -1,4 +1,4 @@
-name: rust-native-verifier-ci
+name: genesis-proof-ci
 
 on:
   pull_request:

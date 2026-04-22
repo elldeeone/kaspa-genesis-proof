@@ -942,6 +942,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "genesis-proof"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "blake2b_simd",
+ "clap",
+ "flate2",
+ "hex",
+ "kaspa-muhash",
+ "prost",
+ "prost-build",
+ "protoc-bin-vendored",
+ "rocksdb",
+ "rusty-leveldb",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1993,27 +2014,6 @@ checksum = "ddb7af00d2b17dbd07d82c0063e25411959748ff03e8d4f96134c2ff41fce34f"
 dependencies = [
  "libc",
  "librocksdb-sys",
-]
-
-[[package]]
-name = "rust-native-verifier"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "bincode",
- "blake2b_simd",
- "clap",
- "flate2",
- "hex",
- "kaspa-muhash",
- "prost",
- "prost-build",
- "protoc-bin-vendored",
- "rocksdb",
- "rusty-leveldb",
- "serde",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]

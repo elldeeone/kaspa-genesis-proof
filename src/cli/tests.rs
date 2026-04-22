@@ -4,7 +4,7 @@ use std::path::PathBuf;
 #[test]
 fn cli_accepts_json_out_flag() {
     let cli = <Cli as clap::Parser>::try_parse_from([
-        "rust-native-verifier",
+        "genesis-proof",
         "--json-out",
         "report.json",
         "--no-input",
@@ -18,7 +18,7 @@ fn cli_accepts_json_out_flag() {
 #[test]
 fn cli_accepts_pre_checkpoint_datadir_flag() {
     let cli = <Cli as clap::Parser>::try_parse_from([
-        "rust-native-verifier",
+        "genesis-proof",
         "--pre-checkpoint-datadir",
         "/tmp/pre-checkpoint",
     ])
@@ -33,7 +33,7 @@ fn cli_accepts_pre_checkpoint_datadir_flag() {
 #[test]
 fn cli_accepts_checkpoint_utxos_gz_flag() {
     let cli = <Cli as clap::Parser>::try_parse_from([
-        "rust-native-verifier",
+        "genesis-proof",
         "--checkpoint-utxos-gz",
         "/tmp/utxos.gz",
     ])

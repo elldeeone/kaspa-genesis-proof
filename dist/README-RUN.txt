@@ -1,4 +1,4 @@
-Kaspa Genesis Proof - Rust Native Verifier
+Kaspa Genesis Proof
 
 Quick start (no flags required):
 
@@ -15,13 +15,13 @@ What happens:
 
 If auto-detection fails, run with explicit path:
 
-rust-native-verifier --node-type auto --datadir <path-to-kaspa-datadir>
+genesis-proof --node-type auto --datadir <path-to-kaspa-datadir>
 
 If you prefer to download the historical checkpoint dump yourself, you can point the verifier at it:
 
-rust-native-verifier --checkpoint-utxos-gz <path-to-utxos.gz>
+genesis-proof --checkpoint-utxos-gz <path-to-utxos.gz>
 
 Examples:
 
-rust-native-verifier --node-type rust --datadir ~/.rusty-kaspa/kaspa-mainnet/datadir
-rust-native-verifier --node-type go --datadir ~/.kaspad/kaspa-mainnet/datadir2
+genesis-proof --node-type rust --datadir ~/.rusty-kaspa/kaspa-mainnet/datadir
+genesis-proof --node-type go --datadir ~/.kaspad/kaspa-mainnet/datadir2

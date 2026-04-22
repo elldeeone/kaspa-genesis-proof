@@ -296,11 +296,11 @@ pub(crate) fn create_go_fixture(tempdir: &TempDir, stale_tip: bool) -> GoFixture
 }
 
 pub(crate) fn run_binary(args: &[&str], current_dir: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_rust-native-verifier"))
+    Command::new(env!("CARGO_BIN_EXE_genesis-proof"))
         .args(args)
         .current_dir(current_dir)
         .output()
-        .expect("run rust-native-verifier")
+        .expect("run genesis-proof")
 }
 
 pub(crate) fn stdout_text(output: &Output) -> String {

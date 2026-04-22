@@ -3,10 +3,10 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "rust-native-verifier",
+    name = "genesis-proof",
     about = "Verify Kaspa chain integrity from the current node state back to genesis",
-    long_about = "Rust-native Kaspa genesis proof verifier. Verifies cryptographic linkage from the current node state back to genesis for both rusty-kaspa (RocksDB) and legacy kaspad (LevelDB), including the hardwired checkpoint/original-genesis proof chain.",
-    after_help = "Examples:\n  rust-native-verifier\n  rust-native-verifier --node-type rust --datadir ~/.rusty-kaspa/kaspa-mainnet/datadir\n  rust-native-verifier --checkpoint-utxos-gz ./utxos.gz\n  rust-native-verifier --no-input --json-out ./kaspa-proof-report.json"
+    long_about = "Kaspa genesis proof verifier. Verifies cryptographic linkage from the current node state back to genesis for both rusty-kaspa (RocksDB) and legacy kaspad (LevelDB), including the hardwired checkpoint/original-genesis proof chain.",
+    after_help = "Examples:\n  genesis-proof\n  genesis-proof --node-type rust --datadir ~/.rusty-kaspa/kaspa-mainnet/datadir\n  genesis-proof --checkpoint-utxos-gz ./utxos.gz\n  genesis-proof --no-input --json-out ./kaspa-proof-report.json"
 )]
 pub struct Cli {
     #[arg(

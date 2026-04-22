@@ -2,11 +2,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_PATH="$SCRIPT_DIR/rust-native-verifier"
+BIN_PATH="$SCRIPT_DIR/genesis-proof"
 
 if [[ ! -x "$BIN_PATH" ]]; then
   echo "Error: $BIN_PATH not found or not executable"
-  echo "Make sure this script is next to the rust-native-verifier binary."
+  echo "Make sure this script is next to the genesis-proof binary."
   read -r -p "Press Enter to exit..." _
   exit 1
 fi
