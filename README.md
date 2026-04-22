@@ -1,75 +1,97 @@
-# Kaspa Genesis Proof (Rust-Native Verifier)
+# Kaspa Genesis Proof (Rust CLI)
 
-Rust-native CLI for cryptographically verifying Kaspa genesis integrity and proving no premine, with full step-by-step terminal output.
+Rust CLI for running the Kaspa genesis proof against `rusty-kaspa` and legacy `kaspad` data.
+
+## Origin
+
+- Original proof notebook by Shai Wyborski and Michael Sutton
+- Notebook: `https://github.com/kaspagang/kaspad-py-explorer/blob/main/src/genesis_proof.ipynb`
+- Paired Go store: `https://github.com/kaspagang/kaspad-py-explorer/blob/main/src/store.py`
+- The notebook is the source of truth
+
+This Rust CLI follows that proof flow. It also adds one extra verification step: it verifies the canonical historical `utxos.gz` against the hardwired checkpoint UTXO commitment before reporting the checkpoint total.
 
 ## Supported Inputs
 
-- `--node-type rust`: `rusty-kaspa` RocksDB datadirs
-- `--node-type go`: legacy `kaspad` LevelDB datadirs
-- `--node-type auto`: probes and selects the matching store type automatically
+- `--node-type rust` for `rusty-kaspa` RocksDB datadirs
+- `--node-type go` for legacy `kaspad` LevelDB datadirs
+- `--node-type auto` to auto-detect the layout
 
 ## Quick Start
 
-### Build
+Build from source:
+
 ```bash
 cargo build --release
 ```
 
-### Run (auto-detect node/datadir)
+Run in default mode:
+
 ```bash
 ./target/release/rust-native-verifier
 ```
 
-### Run with explicit settings
+Run with an explicit datadir:
+
 ```bash
-# Rust node
+# rusty-kaspa
 ./target/release/rust-native-verifier --node-type rust --datadir ~/.rusty-kaspa/kaspa-mainnet/datadir
 
-# Go node (legacy)
+# kaspad
 ./target/release/rust-native-verifier --node-type go --datadir ~/.kaspad/kaspa-mainnet/datadir2
-
-# Non-interactive run with JSON report output
-./target/release/rust-native-verifier --no-input --json-out ./kaspa-proof-report.json
-
-# Use your own manually downloaded canonical checkpoint dump instead of the embedded copy
-./target/release/rust-native-verifier --checkpoint-utxos-gz ./utxos.gz
 ```
 
-## Verification Flow
+Non-interactive run with JSON output:
 
-The verifier checks:
+```bash
+./target/release/rust-native-verifier --no-input --json-out ./kaspa-proof-report.json
+```
 
-1. node database connectivity and layout detection
-2. current tip state and sync advisory
-3. active genesis header hash
-4. hardwired genesis coinbase linkage when applicable
-5. pruning-point hash chain from current tip back to genesis
-6. genesis UTXO commitment analysis
-7. embedded checkpoint chain back to original empty genesis
-8. canonical historical `utxos.gz` MuHash verification and checkpoint supply total
+If you are using a release archive instead of building from source:
 
-## UX Behavior
+- macOS/Linux: run `./run-verifier.sh`
+- Windows: run `run-verifier.bat`
 
-- Shows every verification step in the terminal.
-- If `--datadir` is omitted, default OS Kaspa paths are probed automatically.
-- If node appears behind tip, prompts whether to continue against latest local synced tip.
-- `--no-input` disables prompts and continues automatically through sync advisories.
-- `--json-out PATH` writes a JSON report without prompting.
-- Without `--json-out`, interactive runs prompt whether to export a JSON report at the end.
-- JSON export includes structured fields plus full on-screen output transcript (excluding interactive prompts).
-- The historical checkpoint dump from `kaspad v0.11.5-2` is bundled and verified against the checkpoint/header commitment before the checkpoint total is reported.
-- Operators can override the embedded checkpoint dump with `--checkpoint-utxos-gz PATH` and point the verifier at their own manually downloaded `utxos.gz`.
-- The pre-checkpoint header data and checkpoint UTXO dump follow the same pattern: embedded by default for convenience, operator-overridable with `--pre-checkpoint-datadir PATH` and `--checkpoint-utxos-gz PATH` for independent verification.
+## Independent Inputs
 
-## Project Layout
+Default mode uses embedded verification data for convenience:
 
-- `src/main.rs`: CLI entrypoint and shared runtime constants
-- `src/checkpoint_utxo.rs`: canonical checkpoint `utxos.gz` parser, MuHash verifier, and total-supply calculator
-- `src/store.rs`: Rust/Go store opening, path resolution, and database decoding
-- `src/hashing.rs`: header/transaction hashing and Rust header decoding helpers
-- `src/verify.rs`: end-to-end verification flow
-- `src/model.rs`: shared data structures and report types
-- `src/output.rs`: terminal output and JSON report helpers
+- embedded `checkpoint_data.json`
+- embedded canonical `kaspad v0.11.5-2` `utxos.gz`
+
+If you want to supply your own inputs, use:
+
+```bash
+./target/release/rust-native-verifier \
+  --pre-checkpoint-datadir /path/to/datadir2 \
+  --checkpoint-utxos-gz /path/to/utxos.gz
+```
+
+The second path should be the historical file from:
+
+`https://raw.githubusercontent.com/kaspanet/kaspad/v0.11.5-2/domain/consensus/processes/blockprocessor/resources/utxos.gz`
+
+## What It Verifies
+
+1. current tip to active genesis
+2. hardwired genesis coinbase linkage
+3. checkpoint header linkage back to original empty genesis
+4. checkpoint `utxos.gz` MuHash matches the hardwired checkpoint commitment
+5. checkpoint total is summed from that verified dump
+
+The checkpoint total reported by the Rust CLI is:
+
+- `98,422,254,404,487,171` sompi
+- `984,222,544.04487171` KAS
+
+## Releases
+
+Prebuilt release artifacts are published by `.github/workflows/rust-native-release.yml` for:
+
+- Linux x86_64
+- macOS x86_64
+- macOS aarch64
+- Windows x86_64
 
 ## Testing
 
@@ -77,21 +99,3 @@ The verifier checks:
 cargo fmt --check
 cargo test --locked
 ```
-
-The test suite includes:
-
-- store/path resolution regression tests
-- Go fixture compatibility tests
-- verification-flow tests in `src/verify.rs`
-- process-level CLI tests in `tests/cli.rs` covering `--no-input` and `--json-out`
-
-## Releases
-
-GitHub release artifacts are built by `.github/workflows/rust-native-release.yml` for:
-
-- Windows x86_64
-- Linux x86_64
-- macOS Intel (x86_64)
-- macOS Apple Silicon (aarch64)
-
-Release packaging is gated by formatting and test checks in GitHub Actions before artifacts are built.
