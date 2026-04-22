@@ -1,31 +1,24 @@
-# Kaspa Genesis Proof (Rust CLI)
+# Kaspa Genesis Proof
 
-Rust CLI for running the Kaspa genesis proof against `rusty-kaspa` and legacy `kaspad` data.
+Tools for cryptographically verifying the integrity of the Kaspa blockchain on both Go-based `kaspad` and Rust-based `rusty-kaspa` nodes. The proof shows that the current UTXO set naturally evolved from an empty UTXO set and that there was no premine.
 
-## Origin
+## Trusted Source Reference
 
-- Original proof notebook by Shai Wyborski and Michael Sutton
-- Notebook: `https://github.com/kaspagang/kaspad-py-explorer/blob/main/src/genesis_proof.ipynb`
-- Paired Go store: `https://github.com/kaspagang/kaspad-py-explorer/blob/main/src/store.py`
-- The notebook is the source of truth
+Based on the original genesis proof by Shai Wyborski and Michael Sutton:
 
-This Rust CLI follows that proof flow. It also adds one extra verification step: it verifies the canonical historical `utxos.gz` against the hardwired checkpoint UTXO commitment before reporting the checkpoint total.
-
-## Supported Inputs
-
-- `--node-type rust` for `rusty-kaspa` RocksDB datadirs
-- `--node-type go` for legacy `kaspad` LevelDB datadirs
-- `--node-type auto` to auto-detect the layout
+- Original Source: `https://github.com/kaspagang/kaspad-py-explorer/blob/main/src/genesis_proof.ipynb`
+- Authors: Shai Wyborski, Michael Sutton
+- This repository adapts that proof flow into a maintained CLI for both `kaspad` and `rusty-kaspa` nodes. It preserves the original proof path and adds checkpoint `utxos.gz` commitment verification before reporting the checkpoint total.
 
 ## Quick Start
 
-Build from source:
+Build:
 
 ```bash
 cargo build --release
 ```
 
-Run in default mode:
+Run:
 
 ```bash
 ./target/release/rust-native-verifier
@@ -52,9 +45,9 @@ If you are using a release archive instead of building from source:
 - macOS/Linux: run `./run-verifier.sh`
 - Windows: run `run-verifier.bat`
 
-## Independent Inputs
+## Independent Verification Inputs
 
-Default mode uses embedded verification data for convenience:
+Default mode uses embedded verification data:
 
 - embedded `checkpoint_data.json`
 - embedded canonical `kaspad v0.11.5-2` `utxos.gz`
@@ -67,35 +60,29 @@ If you want to supply your own inputs, use:
   --checkpoint-utxos-gz /path/to/utxos.gz
 ```
 
-The second path should be the historical file from:
+Canonical checkpoint dump source:
 
 `https://raw.githubusercontent.com/kaspanet/kaspad/v0.11.5-2/domain/consensus/processes/blockprocessor/resources/utxos.gz`
 
 ## What It Verifies
 
-1. current tip to active genesis
-2. hardwired genesis coinbase linkage
-3. checkpoint header linkage back to original empty genesis
-4. checkpoint `utxos.gz` MuHash matches the hardwired checkpoint commitment
-5. checkpoint total is summed from that verified dump
+1. active genesis header hash
+2. hardwired genesis coinbase hash, Bitcoin reference, and checkpoint reference
+3. current tip to active genesis hash chain
+4. checkpoint header hash and UTXO commitment match against hardwired genesis
+5. checkpoint chain back to the original genesis, plus original genesis coinbase and empty UTXO commitment
+6. checkpoint `utxos.gz` MuHash matches the hardwired checkpoint commitment, and the checkpoint total is summed from that verified dump
 
-The checkpoint total reported by the Rust CLI is:
+The checkpoint total reported by the verifier is:
 
 - `98,422,254,404,487,171` sompi
 - `984,222,544.04487171` KAS
 
 ## Releases
 
-Prebuilt release artifacts are published by `.github/workflows/rust-native-release.yml` for:
+Prebuilt artifacts are published by `.github/workflows/rust-native-release.yml` for:
 
 - Linux x86_64
 - macOS x86_64
 - macOS aarch64
 - Windows x86_64
-
-## Testing
-
-```bash
-cargo fmt --check
-cargo test --locked
-```
