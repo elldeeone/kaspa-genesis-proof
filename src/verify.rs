@@ -7,27 +7,41 @@ use crate::checkpoint_utxo::{
     verify_checkpoint_utxo_dump,
 };
 use crate::hashing::{hash32_from_hex, header_hash, hex_of, transaction_hash};
+use crate::model::{
+    Hash32, HeaderSource, HeaderStore, ParsedHeader, Transaction, VerificationReport,
+};
 use crate::output::{
     capture_output_line, format_duration_ms, now_millis, print_error, print_header, print_info,
     print_success, print_warning, prompt_continue_on_sync_warning,
 };
-use crate::store::open_store_with_resolved_input;
+use crate::store::{CheckpointStore, GoStore, OpenStoreResult, open_store_with_resolved_input};
 use crate::{
-    BOLD, CHECKPOINT_HASH_HEX, CheckpointStore, Cli, EMPTY_MUHASH_HEX, END, GoStore,
-    HARDWIRED_GENESIS_BITCOIN_BLOCK_HASH_HEX, HARDWIRED_GENESIS_HASH_HEX,
-    HARDWIRED_GENESIS_TX_PAYLOAD_HEX, Hash32, HeaderSource, HeaderStore,
-    MAINNET_SUBNETWORK_ID_COINBASE_HEX, ORIGINAL_GENESIS_BITCOIN_BLOCK_HASH_HEX,
-    ORIGINAL_GENESIS_HASH_HEX, ORIGINAL_GENESIS_TX_PAYLOAD_HEX, OpenStoreResult,
-    TIP_SYNC_WARNING_THRESHOLD_MS, Transaction, VerificationReport,
+    cli::Cli,
+    constants::{
+        BOLD, CHECKPOINT_HASH_HEX, EMPTY_MUHASH_HEX, END, HARDWIRED_GENESIS_BITCOIN_BLOCK_HASH_HEX,
+        HARDWIRED_GENESIS_HASH_HEX, HARDWIRED_GENESIS_TX_PAYLOAD_HEX,
+        MAINNET_SUBNETWORK_ID_COINBASE_HEX, ORIGINAL_GENESIS_BITCOIN_BLOCK_HASH_HEX,
+        ORIGINAL_GENESIS_HASH_HEX, ORIGINAL_GENESIS_TX_PAYLOAD_HEX, TIP_SYNC_WARNING_THRESHOLD_MS,
+    },
 };
 
 enum PreCheckpointSource {
     Embedded(CheckpointStore),
-    External(GoStore),
+    External(Box<GoStore>),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct VerificationInputs<'a> {
+    input_path: &'a Path,
+    pre_checkpoint_datadir: Option<&'a Path>,
+    checkpoint_utxos_gz: Option<&'a Path>,
+    probe_notes: &'a [String],
+    verbose: bool,
+    no_input: bool,
 }
 
 impl HeaderSource for PreCheckpointSource {
-    fn get_raw_header(&mut self, block_hash: &Hash32) -> Result<Option<crate::ParsedHeader>> {
+    fn get_raw_header(&mut self, block_hash: &Hash32) -> Result<Option<ParsedHeader>> {
         match self {
             Self::Embedded(store) => store.get_raw_header(block_hash),
             Self::External(store) => store.get_raw_header(block_hash),
@@ -126,35 +140,15 @@ fn genesis_coinbase_tx_from_payload_hex(payload_hex: &str) -> Result<Transaction
 
 pub(crate) fn verify_genesis(
     store: &mut dyn HeaderStore,
-    input_path: &Path,
-    pre_checkpoint_datadir: Option<&Path>,
-    checkpoint_utxos_gz: Option<&Path>,
-    probe_notes: &[String],
-    verbose: bool,
-    no_input: bool,
+    inputs: VerificationInputs<'_>,
     report: &mut VerificationReport,
 ) -> Result<bool> {
-    verify_genesis_with_prompt(
-        store,
-        input_path,
-        pre_checkpoint_datadir,
-        checkpoint_utxos_gz,
-        probe_notes,
-        verbose,
-        no_input,
-        report,
-        prompt_continue_on_sync_warning,
-    )
+    verify_genesis_with_prompt(store, inputs, report, prompt_continue_on_sync_warning)
 }
 
 fn verify_genesis_with_prompt<F>(
     store: &mut dyn HeaderStore,
-    input_path: &Path,
-    pre_checkpoint_datadir: Option<&Path>,
-    checkpoint_utxos_gz: Option<&Path>,
-    probe_notes: &[String],
-    verbose: bool,
-    no_input: bool,
+    inputs: VerificationInputs<'_>,
     report: &mut VerificationReport,
     _prompt_continue: F,
 ) -> Result<bool>
@@ -169,19 +163,19 @@ where
     print_header("Step 1: Database Connectivity Test");
     print_success("Database opened successfully");
     print_info(&format!("Using {}", store.store_name()));
-    print_info(&format!("Input path: {}", input_path.display()));
+    print_info(&format!("Input path: {}", inputs.input_path.display()));
     print_info(&format!(
         "Resolved DB path: {}",
         store.resolved_db_path().display()
     ));
-    for note in probe_notes {
+    for note in inputs.probe_notes {
         print_info(note);
     }
     for note in store.resolution_notes() {
         print_info(note);
     }
     report.store_type = Some(store.store_name().to_string());
-    report.resolved_input_path = Some(input_path.display().to_string());
+    report.resolved_input_path = Some(inputs.input_path.display().to_string());
     report.resolved_db_path = Some(store.resolved_db_path().display().to_string());
 
     print_header("Step 2: Current Chain State");
@@ -237,7 +231,7 @@ where
                 );
                 report.continued_after_sync_warning = Some(true);
                 report.aborted_due_to_sync_warning = false;
-                if no_input {
+                if inputs.no_input {
                     print_warning(
                         "Sync advisory prompt skipped due to --no-input; continuing automatically.",
                     );
@@ -401,8 +395,12 @@ where
     ));
     print_info("Verifying hash chain from current tip to genesis...");
 
-    if !assert_cryptographic_hash_chain_to_genesis(store, chain_tip, active_genesis_hash, verbose)?
-    {
+    if !assert_cryptographic_hash_chain_to_genesis(
+        store,
+        chain_tip,
+        active_genesis_hash,
+        inputs.verbose,
+    )? {
         print_error("Hash chain verification failed");
         report.error = Some("hash chain verification failed".to_string());
         return Ok(false);
@@ -432,7 +430,7 @@ where
     }
 
     print_header("Step 7: Pre-Checkpoint Verification");
-    let mut checkpoint_store = if let Some(pre_checkpoint_datadir) = pre_checkpoint_datadir {
+    let mut checkpoint_store = if let Some(pre_checkpoint_datadir) = inputs.pre_checkpoint_datadir {
         let store = GoStore::open(pre_checkpoint_datadir)?;
         print_info("Trust model: operator-supplied pre-checkpoint store");
         print_success("Loaded external pre-checkpoint store");
@@ -440,7 +438,7 @@ where
             "Pre-checkpoint store path: {}",
             store.resolved_db_path().display()
         ));
-        PreCheckpointSource::External(store)
+        PreCheckpointSource::External(Box::new(store))
     } else {
         let store = CheckpointStore::from_embedded_json()?;
         print_info(
@@ -499,7 +497,7 @@ where
             &mut checkpoint_store,
             checkpoint_hash,
             original_genesis,
-            verbose,
+            inputs.verbose,
         )? {
             print_error("Checkpoint chain verification failed");
             report.error = Some("checkpoint chain verification failed".to_string());
@@ -576,7 +574,7 @@ where
         }
 
         print_header("Step 8: Checkpoint UTXO Dump Verification");
-        if let Some(path) = checkpoint_utxos_gz {
+        if let Some(path) = inputs.checkpoint_utxos_gz {
             print_info("Trust model: operator-supplied checkpoint UTXO dump");
             print_info(&format!(
                 "Using operator-supplied checkpoint utxos.gz: {}",
@@ -602,7 +600,7 @@ where
 
         let checkpoint_dump = match verify_checkpoint_utxo_dump(
             checkpoint_header.utxo_commitment,
-            checkpoint_utxos_gz,
+            inputs.checkpoint_utxos_gz,
         ) {
             Ok(scan) => scan,
             Err(err) => {
@@ -642,10 +640,7 @@ where
 
         print_info(&format!(
             "Compressed dump size: {} bytes",
-            format_sompi_amount(
-                u64::try_from(checkpoint_scan.compressed_size_bytes)
-                    .expect("checkpoint dump size fits in u64")
-            )
+            format_sompi_amount(checkpoint_scan.compressed_size_bytes)
         ));
         print_info(&format!(
             "Framed UTXO records: {}",
@@ -745,675 +740,17 @@ pub(crate) fn run(cli: &Cli, report: &mut VerificationReport) -> Result<bool> {
 
     verify_genesis(
         &mut *store,
-        &input_path,
-        cli.pre_checkpoint_datadir.as_deref(),
-        cli.checkpoint_utxos_gz.as_deref(),
-        &probe_notes,
-        cli.verbose,
-        cli.no_input,
+        VerificationInputs {
+            input_path: &input_path,
+            pre_checkpoint_datadir: cli.pre_checkpoint_datadir.as_deref(),
+            checkpoint_utxos_gz: cli.checkpoint_utxos_gz.as_deref(),
+            probe_notes: &probe_notes,
+            verbose: cli.verbose,
+            no_input: cli.no_input,
+        },
         report,
     )
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use prost::Message;
-    use rusty_leveldb::{DB as LevelDb, Options as LevelOptions};
-    use std::collections::HashMap;
-    use std::fs;
-    use std::path::PathBuf;
-    use tempfile::TempDir;
-
-    use crate::ParsedHeader;
-    use crate::hashing::{hash32_from_hex, header_hash};
-    use crate::output::clear_output_capture;
-    use crate::proto;
-
-    struct FakeStore {
-        headers: HashMap<Hash32, ParsedHeader>,
-        tips: Vec<Hash32>,
-        headers_selected_tip: Hash32,
-        db_path: PathBuf,
-        notes: Vec<String>,
-    }
-
-    impl HeaderSource for FakeStore {
-        fn get_raw_header(&mut self, block_hash: &Hash32) -> Result<Option<ParsedHeader>> {
-            Ok(self.headers.get(block_hash).cloned())
-        }
-    }
-
-    impl HeaderStore for FakeStore {
-        fn store_name(&self) -> &'static str {
-            "Fake test store"
-        }
-
-        fn resolved_db_path(&self) -> &Path {
-            &self.db_path
-        }
-
-        fn resolution_notes(&self) -> &[String] {
-            &self.notes
-        }
-
-        fn tips(&mut self) -> Result<(Vec<Hash32>, Hash32)> {
-            Ok((self.tips.clone(), self.headers_selected_tip))
-        }
-    }
-
-    fn test_hash(fill: u8) -> Hash32 {
-        [fill; 32]
-    }
-
-    fn base_report() -> VerificationReport {
-        VerificationReport {
-            requested_node_type: "test".to_string(),
-            ..VerificationReport::default()
-        }
-    }
-
-    fn hardwired_genesis_header() -> ParsedHeader {
-        ParsedHeader {
-            version: 0,
-            parents: Vec::new(),
-            hash_merkle_root: hash32_from_hex(
-                "8ec898568c6801d13df4ee6e2a1b54b7e6236f671f20954f05306410518eeb32",
-            )
-            .expect("hash merkle root"),
-            accepted_id_merkle_root: [0u8; 32],
-            utxo_commitment: hash32_from_hex(
-                "710f27df423e63aa6cdb72b89ea5a06cffa399d66f167704455b5af59def8e20",
-            )
-            .expect("utxo commitment"),
-            time_in_milliseconds: 1_637_609_671_037,
-            bits: 486_722_099,
-            nonce: 211_244,
-            daa_score: 1_312_860,
-            blue_score: 0,
-            blue_work_trimmed_be: Vec::new(),
-            pruning_point: [0u8; 32],
-        }
-    }
-
-    fn original_genesis_header() -> ParsedHeader {
-        let mut checkpoint_store = CheckpointStore::from_embedded_json().expect("checkpoint store");
-        let original_genesis_hash =
-            hash32_from_hex(ORIGINAL_GENESIS_HASH_HEX).expect("original genesis hash");
-        checkpoint_store
-            .get_raw_header(&original_genesis_hash)
-            .expect("read original genesis")
-            .expect("original genesis header")
-    }
-
-    fn make_tip_header_with_blue_work(
-        pruning_point: Hash32,
-        time_in_milliseconds: u64,
-        blue_work_trimmed_be: Vec<u8>,
-    ) -> (Hash32, ParsedHeader) {
-        let header = ParsedHeader {
-            version: 1,
-            parents: vec![vec![test_hash(0x11)]],
-            hash_merkle_root: test_hash(0x22),
-            accepted_id_merkle_root: test_hash(0x33),
-            utxo_commitment: test_hash(0x44),
-            time_in_milliseconds,
-            bits: 0x1d00ffff,
-            nonce: 42,
-            daa_score: 7,
-            blue_score: 8,
-            blue_work_trimmed_be,
-            pruning_point,
-        };
-        let hash = header_hash(&header);
-        (hash, header)
-    }
-
-    fn make_tip_header(pruning_point: Hash32, time_in_milliseconds: u64) -> (Hash32, ParsedHeader) {
-        make_tip_header_with_blue_work(pruning_point, time_in_milliseconds, vec![0x01, 0x02, 0x03])
-    }
-
-    fn create_go_leveldb(db_path: &Path, entries: &[(Vec<u8>, Vec<u8>)]) {
-        fs::create_dir_all(db_path).expect("create go db dir");
-
-        let mut opts = LevelOptions::default();
-        opts.create_if_missing = true;
-
-        let mut db = LevelDb::open(db_path, opts).expect("open go db");
-        for (key, value) in entries {
-            db.put(key, value).expect("write go db key");
-        }
-        db.flush().expect("flush go db");
-        db.close().expect("close go db");
-    }
-
-    fn encode_db_block_header(header: &ParsedHeader) -> Vec<u8> {
-        proto::DbBlockHeader {
-            version: u32::from(header.version),
-            parents: header
-                .parents
-                .iter()
-                .map(|level| proto::DbBlockLevelParents {
-                    parent_hashes: level
-                        .iter()
-                        .map(|hash| proto::DbHash {
-                            hash: hash.to_vec(),
-                        })
-                        .collect(),
-                })
-                .collect(),
-            hash_merkle_root: Some(proto::DbHash {
-                hash: header.hash_merkle_root.to_vec(),
-            }),
-            accepted_id_merkle_root: Some(proto::DbHash {
-                hash: header.accepted_id_merkle_root.to_vec(),
-            }),
-            utxo_commitment: Some(proto::DbHash {
-                hash: header.utxo_commitment.to_vec(),
-            }),
-            time_in_milliseconds: i64::try_from(header.time_in_milliseconds)
-                .expect("header timestamp fits in i64"),
-            bits: header.bits,
-            nonce: header.nonce,
-            daa_score: header.daa_score,
-            blue_work: header.blue_work_trimmed_be.clone(),
-            pruning_point: Some(proto::DbHash {
-                hash: header.pruning_point.to_vec(),
-            }),
-            blue_score: header.blue_score,
-        }
-        .encode_to_vec()
-    }
-
-    fn go_bucketed_key(active_prefix: u8, bucket: &[u8], suffix: Option<&[u8]>) -> Vec<u8> {
-        let mut key =
-            Vec::with_capacity(2 + bucket.len() + suffix.map(|s| 1 + s.len()).unwrap_or(0));
-        key.push(active_prefix);
-        key.push(b'/');
-        key.extend_from_slice(bucket);
-        if let Some(suffix) = suffix {
-            key.push(b'/');
-            key.extend_from_slice(suffix);
-        }
-        key
-    }
-
-    fn fake_store_with_tip(
-        genesis_hash: Hash32,
-        genesis_header: ParsedHeader,
-        tip_time_in_milliseconds: u64,
-    ) -> FakeStore {
-        let (tip_hash, tip_header) = make_tip_header(genesis_hash, tip_time_in_milliseconds);
-        let mut headers = HashMap::new();
-        headers.insert(genesis_hash, genesis_header);
-        headers.insert(tip_hash, tip_header);
-
-        FakeStore {
-            headers,
-            tips: vec![tip_hash],
-            headers_selected_tip: tip_hash,
-            db_path: PathBuf::from("/tmp/fake-db"),
-            notes: vec!["fixture note".to_string()],
-        }
-    }
-
-    #[test]
-    fn choose_chain_tip_prefers_first_dag_tip_even_when_hst_differs() {
-        let first_tip = test_hash(0x11);
-        let tips = vec![first_tip, test_hash(0x22)];
-        let headers_selected_tip = test_hash(0x77);
-
-        assert_eq!(
-            choose_chain_tip_for_verification(&tips, headers_selected_tip),
-            first_tip
-        );
-    }
-
-    #[test]
-    fn choose_chain_tip_uses_first_dag_tip_even_when_hst_is_also_present() {
-        let first_tip = test_hash(0x11);
-        let headers_selected_tip = test_hash(0x77);
-        let tips = vec![first_tip, headers_selected_tip];
-
-        assert_eq!(
-            choose_chain_tip_for_verification(&tips, headers_selected_tip),
-            first_tip
-        );
-    }
-
-    #[test]
-    fn choose_chain_tip_returns_zero_when_no_dag_tips_exist_even_if_hst_exists() {
-        let headers_selected_tip = test_hash(0x77);
-
-        assert_eq!(
-            choose_chain_tip_for_verification(&[], headers_selected_tip),
-            [0u8; 32]
-        );
-    }
-
-    #[test]
-    fn choose_chain_tip_returns_zero_when_no_dag_tip_or_selected_tip_exists() {
-        assert_eq!(choose_chain_tip_for_verification(&[], [0u8; 32]), [0u8; 32]);
-    }
-
-    #[test]
-    fn verify_genesis_succeeds_for_hardwired_mode() {
-        clear_output_capture();
-        let tip_time = now_millis().expect("now");
-        let hardwired_genesis =
-            hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX).expect("hardwired genesis hash");
-        let mut store =
-            fake_store_with_tip(hardwired_genesis, hardwired_genesis_header(), tip_time);
-        let mut report = base_report();
-
-        let result = verify_genesis_with_prompt(
-            &mut store,
-            Path::new("/tmp/fake-input"),
-            None,
-            None,
-            &["probe note".to_string()],
-            false,
-            false,
-            &mut report,
-            |_| -> Result<bool> { panic!("sync warning prompt should not run") },
-        )
-        .expect("verify genesis");
-
-        assert!(result);
-        assert_eq!(report.genesis_mode.as_deref(), Some("hardwired"));
-        assert_eq!(report.tips_count, Some(1));
-        assert_eq!(report.store_type.as_deref(), Some("Fake test store"));
-        assert!(report.checkpoint_utxo_dump_verified);
-        assert_eq!(
-            report.checkpoint_total_sompi.as_deref(),
-            Some("98422254404487171")
-        );
-        assert_eq!(
-            report.checkpoint_total_kas.as_deref(),
-            Some("984,222,544.04487171")
-        );
-        assert_eq!(report.error, None);
-        assert_eq!(report.tips.len(), 1);
-    }
-
-    #[test]
-    fn verify_genesis_succeeds_for_original_mode() {
-        clear_output_capture();
-        let tip_time = now_millis().expect("now");
-        let original_genesis =
-            hash32_from_hex(ORIGINAL_GENESIS_HASH_HEX).expect("original genesis hash");
-        let mut store = fake_store_with_tip(original_genesis, original_genesis_header(), tip_time);
-        let mut report = base_report();
-
-        let result = verify_genesis_with_prompt(
-            &mut store,
-            Path::new("/tmp/fake-input"),
-            None,
-            None,
-            &[],
-            false,
-            false,
-            &mut report,
-            |_| -> Result<bool> { panic!("sync warning prompt should not run") },
-        )
-        .expect("verify genesis");
-
-        assert!(result);
-        assert_eq!(report.genesis_mode.as_deref(), Some("original"));
-        assert_eq!(
-            report.active_genesis_hash.as_deref(),
-            Some(ORIGINAL_GENESIS_HASH_HEX)
-        );
-        assert_eq!(report.error, None);
-    }
-
-    #[test]
-    fn verify_genesis_accepts_external_pre_checkpoint_store() {
-        clear_output_capture();
-        let tempdir = TempDir::new().expect("tempdir");
-        let db_path = tempdir.path().join("datadir2");
-        let active_prefix = 0u8;
-        let checkpoint_store = CheckpointStore::from_embedded_json().expect("checkpoint store");
-        let mut entries = vec![(b"active-prefix".to_vec(), vec![active_prefix])];
-        for (hash, header) in &checkpoint_store.headers {
-            entries.push((
-                go_bucketed_key(active_prefix, b"block-headers", Some(hash)),
-                encode_db_block_header(header),
-            ));
-        }
-
-        create_go_leveldb(&db_path, &entries);
-
-        let tip_time = now_millis().expect("now");
-        let hardwired_genesis =
-            hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX).expect("hardwired genesis hash");
-        let mut current_store =
-            fake_store_with_tip(hardwired_genesis, hardwired_genesis_header(), tip_time);
-        let mut report = base_report();
-
-        let result = verify_genesis_with_prompt(
-            &mut current_store,
-            Path::new("/tmp/fake-input"),
-            Some(db_path.as_path()),
-            None,
-            &[],
-            false,
-            true,
-            &mut report,
-            |_| Ok(false),
-        )
-        .expect("verify genesis");
-
-        assert!(result);
-        assert_eq!(report.error, None);
-    }
-
-    #[test]
-    fn verify_genesis_prefers_real_dag_tip_over_headers_selected_tip() {
-        clear_output_capture();
-        let tip_time = now_millis().expect("now");
-        let hardwired_genesis =
-            hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX).expect("hardwired genesis hash");
-        let (real_tip_hash, real_tip_header) = make_tip_header(hardwired_genesis, tip_time);
-        let headers_selected_tip = test_hash(0xfe);
-        let mut headers = HashMap::new();
-        headers.insert(hardwired_genesis, hardwired_genesis_header());
-        headers.insert(real_tip_hash, real_tip_header);
-
-        let mut store = FakeStore {
-            headers,
-            tips: vec![real_tip_hash],
-            headers_selected_tip,
-            db_path: PathBuf::from("/tmp/fake-db"),
-            notes: Vec::new(),
-        };
-        let mut report = base_report();
-
-        let result = verify_genesis_with_prompt(
-            &mut store,
-            Path::new("/tmp/fake-input"),
-            None,
-            None,
-            &[],
-            false,
-            false,
-            &mut report,
-            |_| -> Result<bool> { panic!("sync warning prompt should not run") },
-        )
-        .expect("verify genesis");
-
-        let expected_hst = hex_of(&headers_selected_tip);
-        let expected_chain_tip = hex_of(&real_tip_hash);
-        assert!(result);
-        assert_eq!(
-            report.headers_selected_tip.as_deref(),
-            Some(expected_hst.as_str())
-        );
-        assert_eq!(
-            report.chain_tip_used.as_deref(),
-            Some(expected_chain_tip.as_str())
-        );
-        assert_eq!(report.error, None);
-    }
-
-    #[test]
-    fn verify_genesis_uses_real_chain_tip_for_sync_age_when_hst_is_stale() {
-        clear_output_capture();
-        let fresh_tip_time = now_millis().expect("now");
-        let stale_hst_time = fresh_tip_time.saturating_sub(TIP_SYNC_WARNING_THRESHOLD_MS + 1);
-        let hardwired_genesis =
-            hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX).expect("hardwired genesis hash");
-        let (real_tip_hash, real_tip_header) = make_tip_header(hardwired_genesis, fresh_tip_time);
-        let headers_selected_tip = test_hash(0xfd);
-        let (_unused_hash, stale_hst_header) = make_tip_header(hardwired_genesis, stale_hst_time);
-        let mut headers = HashMap::new();
-        headers.insert(hardwired_genesis, hardwired_genesis_header());
-        headers.insert(real_tip_hash, real_tip_header);
-        headers.insert(headers_selected_tip, stale_hst_header);
-
-        let mut store = FakeStore {
-            headers,
-            tips: vec![real_tip_hash],
-            headers_selected_tip,
-            db_path: PathBuf::from("/tmp/fake-db"),
-            notes: Vec::new(),
-        };
-        let mut report = base_report();
-
-        let result = verify_genesis_with_prompt(
-            &mut store,
-            Path::new("/tmp/fake-input"),
-            None,
-            None,
-            &[],
-            false,
-            false,
-            &mut report,
-            |_| -> Result<bool> { panic!("sync warning prompt should not run") },
-        )
-        .expect("verify genesis");
-
-        assert!(result);
-        assert_eq!(report.chain_tip_timestamp_ms, Some(fresh_tip_time));
-        assert_eq!(
-            report.headers_selected_tip_timestamp_ms,
-            Some(stale_hst_time)
-        );
-        assert!(!report.sync_warning_triggered);
-        assert!(report.tip_age_ms.unwrap_or(u64::MAX) < TIP_SYNC_WARNING_THRESHOLD_MS);
-    }
-
-    #[test]
-    fn verify_genesis_uses_real_chain_tip_for_sync_warning_when_hst_is_fresh() {
-        clear_output_capture();
-        let fresh_hst_time = now_millis().expect("now");
-        let stale_tip_time = fresh_hst_time.saturating_sub(TIP_SYNC_WARNING_THRESHOLD_MS + 1);
-        let hardwired_genesis =
-            hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX).expect("hardwired genesis hash");
-        let (real_tip_hash, real_tip_header) = make_tip_header(hardwired_genesis, stale_tip_time);
-        let headers_selected_tip = test_hash(0xfc);
-        let (_unused_hash, fresh_hst_header) = make_tip_header(hardwired_genesis, fresh_hst_time);
-        let mut headers = HashMap::new();
-        headers.insert(hardwired_genesis, hardwired_genesis_header());
-        headers.insert(real_tip_hash, real_tip_header);
-        headers.insert(headers_selected_tip, fresh_hst_header);
-
-        let mut store = FakeStore {
-            headers,
-            tips: vec![real_tip_hash],
-            headers_selected_tip,
-            db_path: PathBuf::from("/tmp/fake-db"),
-            notes: Vec::new(),
-        };
-        let mut report = base_report();
-        let mut prompt_calls = 0usize;
-
-        let result = verify_genesis_with_prompt(
-            &mut store,
-            Path::new("/tmp/fake-input"),
-            None,
-            None,
-            &[],
-            false,
-            false,
-            &mut report,
-            |_| {
-                prompt_calls += 1;
-                Ok(true)
-            },
-        )
-        .expect("verify genesis");
-
-        assert!(result);
-        assert_eq!(prompt_calls, 0);
-        assert_eq!(report.chain_tip_timestamp_ms, Some(stale_tip_time));
-        assert_eq!(
-            report.headers_selected_tip_timestamp_ms,
-            Some(fresh_hst_time)
-        );
-        assert!(report.sync_warning_triggered);
-        assert_eq!(report.continued_after_sync_warning, Some(true));
-        assert!(report.tip_age_ms.unwrap_or(0) > TIP_SYNC_WARNING_THRESHOLD_MS);
-    }
-
-    #[test]
-    fn verify_genesis_records_sync_warning_and_continues_without_prompt() {
-        clear_output_capture();
-        let stale_tip_time = now_millis()
-            .expect("now")
-            .saturating_sub(TIP_SYNC_WARNING_THRESHOLD_MS + 1);
-        let hardwired_genesis =
-            hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX).expect("hardwired genesis hash");
-        let mut store = fake_store_with_tip(
-            hardwired_genesis,
-            hardwired_genesis_header(),
-            stale_tip_time,
-        );
-        let mut report = base_report();
-        let mut prompt_calls = 0usize;
-
-        let result = verify_genesis_with_prompt(
-            &mut store,
-            Path::new("/tmp/fake-input"),
-            None,
-            None,
-            &[],
-            false,
-            false,
-            &mut report,
-            |no_input| {
-                prompt_calls += 1;
-                assert!(!no_input);
-                Ok(true)
-            },
-        )
-        .expect("verify genesis");
-
-        assert!(result);
-        assert_eq!(prompt_calls, 0);
-        assert!(report.sync_warning_triggered);
-        assert_eq!(report.continued_after_sync_warning, Some(true));
-        assert!(!report.aborted_due_to_sync_warning);
-        assert_eq!(report.error, None);
-    }
-
-    #[test]
-    fn verify_genesis_sync_warning_never_aborts_proof_flow() {
-        clear_output_capture();
-        let stale_tip_time = now_millis()
-            .expect("now")
-            .saturating_sub(TIP_SYNC_WARNING_THRESHOLD_MS + 1);
-        let hardwired_genesis =
-            hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX).expect("hardwired genesis hash");
-        let mut store = fake_store_with_tip(
-            hardwired_genesis,
-            hardwired_genesis_header(),
-            stale_tip_time,
-        );
-        let mut report = base_report();
-        let mut prompt_calls = 0usize;
-
-        let result = verify_genesis_with_prompt(
-            &mut store,
-            Path::new("/tmp/fake-input"),
-            None,
-            None,
-            &[],
-            false,
-            false,
-            &mut report,
-            |no_input| {
-                prompt_calls += 1;
-                assert!(!no_input);
-                Ok(false)
-            },
-        )
-        .expect("verify genesis");
-
-        assert!(result);
-        assert_eq!(prompt_calls, 0);
-        assert!(report.sync_warning_triggered);
-        assert_eq!(report.continued_after_sync_warning, Some(true));
-        assert!(!report.aborted_due_to_sync_warning);
-        assert_eq!(report.error, None);
-    }
-
-    #[test]
-    fn verify_genesis_fails_when_tip_header_is_missing() {
-        clear_output_capture();
-        let hardwired_genesis =
-            hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX).expect("hardwired genesis hash");
-        let missing_tip_hash = test_hash(0xaa);
-        let mut headers = HashMap::new();
-        headers.insert(hardwired_genesis, hardwired_genesis_header());
-
-        let mut store = FakeStore {
-            headers,
-            tips: vec![missing_tip_hash],
-            headers_selected_tip: missing_tip_hash,
-            db_path: PathBuf::from("/tmp/fake-db"),
-            notes: Vec::new(),
-        };
-        let mut report = base_report();
-
-        let result = verify_genesis_with_prompt(
-            &mut store,
-            Path::new("/tmp/fake-input"),
-            None,
-            None,
-            &[],
-            false,
-            false,
-            &mut report,
-            |_| -> Result<bool> { panic!("sync warning prompt should not run") },
-        )
-        .expect("verify genesis");
-
-        assert!(!result);
-        assert_eq!(
-            report.error.as_deref(),
-            Some("hash chain verification failed")
-        );
-    }
-
-    #[test]
-    fn verify_genesis_fails_when_tip_hash_does_not_match_header_contents() {
-        clear_output_capture();
-        let tip_time = now_millis().expect("now");
-        let hardwired_genesis =
-            hash32_from_hex(HARDWIRED_GENESIS_HASH_HEX).expect("hardwired genesis hash");
-        let wrong_tip_hash = test_hash(0xbb);
-        let (_actual_tip_hash, tip_header) = make_tip_header(hardwired_genesis, tip_time);
-        let mut headers = HashMap::new();
-        headers.insert(hardwired_genesis, hardwired_genesis_header());
-        headers.insert(wrong_tip_hash, tip_header);
-
-        let mut store = FakeStore {
-            headers,
-            tips: vec![wrong_tip_hash],
-            headers_selected_tip: wrong_tip_hash,
-            db_path: PathBuf::from("/tmp/fake-db"),
-            notes: Vec::new(),
-        };
-        let mut report = base_report();
-
-        let result = verify_genesis_with_prompt(
-            &mut store,
-            Path::new("/tmp/fake-input"),
-            None,
-            None,
-            &[],
-            false,
-            false,
-            &mut report,
-            |_| -> Result<bool> { panic!("sync warning prompt should not run") },
-        )
-        .expect("verify genesis");
-
-        assert!(!result);
-        assert_eq!(
-            report.error.as_deref(),
-            Some("hash chain verification failed")
-        );
-    }
-}
+mod tests;

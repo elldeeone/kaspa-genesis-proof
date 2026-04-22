@@ -1,0 +1,25 @@
+name: Rust Native Verify
+description: Run formatter, clippy, and the full Rust verifier test suite.
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+
+    - name: Check formatting
+      shell: bash
+      run: cargo fmt --check
+
+    - name: Run clippy
+      shell: bash
+      run: cargo clippy --all-targets --all-features -- -D warnings
+
+    - name: Run test suite
+      shell: bash
+      run: cargo test --locked

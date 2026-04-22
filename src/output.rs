@@ -5,9 +5,11 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{
-    BLUE, BOLD, Cli, CliNodeType, END, GREEN, OUTPUT_CAPTURE, RED, VerificationReport, YELLOW,
-};
+use crate::cli::{Cli, CliNodeType};
+use crate::constants::{BLUE, BOLD, END, GREEN, RED, YELLOW};
+use crate::model::VerificationReport;
+
+static OUTPUT_CAPTURE: std::sync::OnceLock<Mutex<Vec<String>>> = std::sync::OnceLock::new();
 
 pub(crate) fn print_header(text: &str) {
     let sep = "=".repeat(60);
@@ -124,12 +126,11 @@ pub(crate) fn build_initial_report(cli: &Cli) -> VerificationReport {
 }
 
 pub(crate) fn write_json_report(path: &Path, report: &VerificationReport) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("failed creating report parent dir {}", parent.display())
-            })?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed creating report parent dir {}", parent.display()))?;
     }
 
     let json = serde_json::to_string_pretty(report).context("failed serializing JSON report")?;

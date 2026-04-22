@@ -1,145 +1,18 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use blake2b_simd::Params;
 
-use crate::{
-    Hash32, HeaderWireCompressed, HeaderWireLegacy, HeaderWithBlockLevelWireCompressed,
-    HeaderWithBlockLevelWireLegacy, ParsedHeader, Transaction,
-};
-
-pub(crate) fn to_hash32(bytes: &[u8]) -> Result<Hash32> {
-    if bytes.len() != 32 {
-        bail!("expected 32 bytes, got {}", bytes.len());
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(bytes);
-    Ok(out)
-}
+use crate::model::{Hash32, ParsedHeader, Transaction};
 
 pub(crate) fn hash32_from_hex(hex_str: &str) -> Result<Hash32> {
     let decoded = hex::decode(hex_str).with_context(|| format!("invalid hex: {hex_str}"))?;
-    to_hash32(&decoded)
+    decoded
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("expected 32 bytes, got {}", decoded.len()))
 }
 
 pub(crate) fn hex_of(hash: &Hash32) -> String {
     hex::encode(hash)
-}
-
-fn trimmed_blue_work_from_words(words: [u64; 3]) -> Vec<u8> {
-    let mut le = [0u8; 24];
-    for (i, w) in words.iter().enumerate() {
-        le[i * 8..(i + 1) * 8].copy_from_slice(&w.to_le_bytes());
-    }
-
-    let mut be = le;
-    be.reverse();
-    let start = be.iter().position(|b| *b != 0).unwrap_or(be.len());
-    be[start..].to_vec()
-}
-
-fn expand_compressed_parents(runs: &[(u8, Vec<Hash32>)]) -> Result<Vec<Vec<Hash32>>> {
-    let mut out: Vec<Vec<Hash32>> = Vec::new();
-    let mut prev = 0u8;
-
-    for (cumulative, parents) in runs {
-        if *cumulative <= prev {
-            bail!(
-                "invalid compressed parents: non-increasing cumulative count {} <= {}",
-                cumulative,
-                prev
-            );
-        }
-        let repeat = (*cumulative - prev) as usize;
-        for _ in 0..repeat {
-            out.push(parents.clone());
-        }
-        prev = *cumulative;
-    }
-
-    Ok(out)
-}
-
-fn convert_header_wire_compressed(h: HeaderWireCompressed) -> Result<ParsedHeader> {
-    let _ = h.hash;
-    Ok(ParsedHeader {
-        version: h.version,
-        parents: expand_compressed_parents(&h.parents_by_level.0)?,
-        hash_merkle_root: h.hash_merkle_root,
-        accepted_id_merkle_root: h.accepted_id_merkle_root,
-        utxo_commitment: h.utxo_commitment,
-        time_in_milliseconds: h.timestamp,
-        bits: h.bits,
-        nonce: h.nonce,
-        daa_score: h.daa_score,
-        blue_score: h.blue_score,
-        blue_work_trimmed_be: trimmed_blue_work_from_words(h.blue_work),
-        pruning_point: h.pruning_point,
-    })
-}
-
-fn convert_header_wire_legacy(h: HeaderWireLegacy) -> ParsedHeader {
-    let _ = h.hash;
-    ParsedHeader {
-        version: h.version,
-        parents: h.parents_by_level,
-        hash_merkle_root: h.hash_merkle_root,
-        accepted_id_merkle_root: h.accepted_id_merkle_root,
-        utxo_commitment: h.utxo_commitment,
-        time_in_milliseconds: h.timestamp,
-        bits: h.bits,
-        nonce: h.nonce,
-        daa_score: h.daa_score,
-        blue_score: h.blue_score,
-        blue_work_trimmed_be: trimmed_blue_work_from_words(h.blue_work),
-        pruning_point: h.pruning_point,
-    }
-}
-
-pub(crate) fn decode_rust_header(bytes: &[u8]) -> Result<ParsedHeader> {
-    if let Ok(wire) = bincode::deserialize::<HeaderWithBlockLevelWireCompressed>(bytes) {
-        let _ = wire.block_level;
-        return convert_header_wire_compressed(wire.header);
-    }
-
-    if let Ok(wire) = bincode::deserialize::<HeaderWithBlockLevelWireLegacy>(bytes) {
-        let _ = wire.block_level;
-        return Ok(convert_header_wire_legacy(wire.header));
-    }
-
-    if let Ok(wire) = bincode::deserialize::<HeaderWireCompressed>(bytes) {
-        return convert_header_wire_compressed(wire);
-    }
-
-    if let Ok(wire) = bincode::deserialize::<HeaderWireLegacy>(bytes) {
-        return Ok(convert_header_wire_legacy(wire));
-    }
-
-    bail!("failed decoding rust header in known bincode formats")
-}
-
-pub(crate) fn decode_tip_hash_from_key_suffix(suffix: &[u8]) -> Option<Hash32> {
-    if suffix.len() == 32 {
-        let mut out = [0u8; 32];
-        out.copy_from_slice(suffix);
-        return Some(out);
-    }
-
-    if suffix.len() >= 40 {
-        let mut len_bytes = [0u8; 8];
-        len_bytes.copy_from_slice(&suffix[0..8]);
-        if u64::from_le_bytes(len_bytes) == 32 {
-            let mut out = [0u8; 32];
-            out.copy_from_slice(&suffix[8..40]);
-            return Some(out);
-        }
-    }
-
-    if suffix.len() >= 32 {
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&suffix[suffix.len() - 32..]);
-        return Some(out);
-    }
-
-    None
 }
 
 fn new_blake2b_32(key: &[u8]) -> blake2b_simd::State {

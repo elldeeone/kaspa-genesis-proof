@@ -6,7 +6,7 @@ use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
 use std::sync::OnceLock;
 
-use crate::Hash32;
+use crate::model::Hash32;
 
 pub(crate) const CHECKPOINT_UTXO_DUMP_SOURCE_LABEL: &str =
     "embedded kaspad v0.11.5-2 resources/utxos.gz";
