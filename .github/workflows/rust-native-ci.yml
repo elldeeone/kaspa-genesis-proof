@@ -7,6 +7,10 @@ on:
       - main
       - rust-native
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -22,7 +26,8 @@ jobs:
         uses: ./.github/actions/rust-native-verify
 
   build-matrix:
-    name: Build on ${{ matrix.os }}
+    if: github.event_name == 'pull_request'
+    name: Cross-platform build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
