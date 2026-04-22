@@ -85,6 +85,5 @@ The checkpoint total reported by the verifier is:
 Prebuilt artifacts are published by the release workflow for:
 
 - Linux x86_64
-- macOS x86_64
 - macOS aarch64
 - Windows x86_64
