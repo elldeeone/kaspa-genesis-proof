@@ -7,6 +7,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+mod checkpoint_utxo;
 mod hashing;
 mod model;
 mod output;
@@ -66,7 +67,7 @@ static OUTPUT_CAPTURE: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
     name = "rust-native-verifier",
     about = "Verify Kaspa chain integrity from the current node state back to genesis",
     long_about = "Rust-native Kaspa genesis proof verifier. Verifies cryptographic linkage from the current node state back to genesis for both rusty-kaspa (RocksDB) and legacy kaspad (LevelDB), including the hardwired checkpoint/original-genesis proof chain.",
-    after_help = "Examples:\n  rust-native-verifier\n  rust-native-verifier --node-type rust --datadir ~/.rusty-kaspa/kaspa-mainnet/datadir\n  rust-native-verifier --no-input --json-out ./kaspa-proof-report.json"
+    after_help = "Examples:\n  rust-native-verifier\n  rust-native-verifier --node-type rust --datadir ~/.rusty-kaspa/kaspa-mainnet/datadir\n  rust-native-verifier --checkpoint-utxos-gz ./utxos.gz\n  rust-native-verifier --no-input --json-out ./kaspa-proof-report.json"
 )]
 struct Cli {
     #[arg(
@@ -89,6 +90,13 @@ struct Cli {
         help = "Optional pre-checkpoint Go datadir to reproduce the notebook's external checkpoint/original-genesis verification path"
     )]
     pre_checkpoint_datadir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Optional path to a manually downloaded kaspad v0.11.5-2 resources/utxos.gz file; if omitted, the verifier uses its embedded canonical copy"
+    )]
+    checkpoint_utxos_gz: Option<PathBuf>,
 
     #[arg(
         long,
@@ -968,6 +976,7 @@ mod tests {
             node_type: CliNodeType::Auto,
             datadir: Some(db_path.clone()),
             pre_checkpoint_datadir: None,
+            checkpoint_utxos_gz: None,
             json_out: None,
             verbose: false,
             no_input: true,
@@ -1009,6 +1018,21 @@ mod tests {
         assert_eq!(
             cli.pre_checkpoint_datadir,
             Some(PathBuf::from("/tmp/pre-checkpoint"))
+        );
+    }
+
+    #[test]
+    fn cli_accepts_checkpoint_utxos_gz_flag() {
+        let cli = Cli::try_parse_from([
+            "rust-native-verifier",
+            "--checkpoint-utxos-gz",
+            "/tmp/utxos.gz",
+        ])
+        .expect("parse cli");
+
+        assert_eq!(
+            cli.checkpoint_utxos_gz,
+            Some(PathBuf::from("/tmp/utxos.gz"))
         );
     }
 }

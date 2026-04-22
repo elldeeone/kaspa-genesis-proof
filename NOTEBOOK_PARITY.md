@@ -76,6 +76,8 @@ These features are allowed because they do not remove notebook verification:
 - non-interactive mode
 - sync freshness advisory, provided it is warning-only
 - embedded `checkpoint_data.json` fallback when `--pre-checkpoint-datadir` is not supplied
+- embedded historical `kaspad v0.11.5-2` `utxos.gz` verification, provided it remains additive to the notebook/header proof chain
+- operator-supplied `--checkpoint-utxos-gz PATH`, provided the verifier still defaults to the embedded canonical copy and still checks the same hardwired commitment
 
 ## Guardrails
 

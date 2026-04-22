@@ -30,6 +30,9 @@ cargo build --release
 
 # Non-interactive run with JSON report output
 ./target/release/rust-native-verifier --no-input --json-out ./kaspa-proof-report.json
+
+# Use your own manually downloaded canonical checkpoint dump instead of the embedded copy
+./target/release/rust-native-verifier --checkpoint-utxos-gz ./utxos.gz
 ```
 
 ## Verification Flow
@@ -43,6 +46,7 @@ The verifier checks:
 5. pruning-point hash chain from current tip back to genesis
 6. genesis UTXO commitment analysis
 7. embedded checkpoint chain back to original empty genesis
+8. canonical historical `utxos.gz` MuHash verification and checkpoint supply total
 
 ## UX Behavior
 
@@ -53,10 +57,14 @@ The verifier checks:
 - `--json-out PATH` writes a JSON report without prompting.
 - Without `--json-out`, interactive runs prompt whether to export a JSON report at the end.
 - JSON export includes structured fields plus full on-screen output transcript (excluding interactive prompts).
+- The historical checkpoint dump from `kaspad v0.11.5-2` is bundled and verified against the checkpoint/header commitment before the checkpoint total is reported.
+- Operators can override the embedded checkpoint dump with `--checkpoint-utxos-gz PATH` and point the verifier at their own manually downloaded `utxos.gz`.
+- The pre-checkpoint header data and checkpoint UTXO dump follow the same pattern: embedded by default for convenience, operator-overridable with `--pre-checkpoint-datadir PATH` and `--checkpoint-utxos-gz PATH` for independent verification.
 
 ## Project Layout
 
 - `src/main.rs`: CLI entrypoint and shared runtime constants
+- `src/checkpoint_utxo.rs`: canonical checkpoint `utxos.gz` parser, MuHash verifier, and total-supply calculator
 - `src/store.rs`: Rust/Go store opening, path resolution, and database decoding
 - `src/hashing.rs`: header/transaction hashing and Rust header decoding helpers
 - `src/verify.rs`: end-to-end verification flow

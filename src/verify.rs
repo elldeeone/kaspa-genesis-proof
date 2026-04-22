@@ -1,6 +1,11 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
+use crate::checkpoint_utxo::{
+    CHECKPOINT_UTXO_DUMP_SOURCE_LABEL, CHECKPOINT_UTXO_DUMP_SOURCE_URL,
+    format_kas_amount_from_sompi, format_sompi_amount, reference_baseline_sompi,
+    verify_checkpoint_utxo_dump,
+};
 use crate::hashing::{hash32_from_hex, header_hash, hex_of, transaction_hash};
 use crate::output::{
     capture_output_line, format_duration_ms, now_millis, print_error, print_header, print_info,
@@ -123,6 +128,7 @@ pub(crate) fn verify_genesis(
     store: &mut dyn HeaderStore,
     input_path: &Path,
     pre_checkpoint_datadir: Option<&Path>,
+    checkpoint_utxos_gz: Option<&Path>,
     probe_notes: &[String],
     verbose: bool,
     no_input: bool,
@@ -132,6 +138,7 @@ pub(crate) fn verify_genesis(
         store,
         input_path,
         pre_checkpoint_datadir,
+        checkpoint_utxos_gz,
         probe_notes,
         verbose,
         no_input,
@@ -144,6 +151,7 @@ fn verify_genesis_with_prompt<F>(
     store: &mut dyn HeaderStore,
     input_path: &Path,
     pre_checkpoint_datadir: Option<&Path>,
+    checkpoint_utxos_gz: Option<&Path>,
     probe_notes: &[String],
     verbose: bool,
     no_input: bool,
@@ -426,6 +434,7 @@ where
     print_header("Step 7: Pre-Checkpoint Verification");
     let mut checkpoint_store = if let Some(pre_checkpoint_datadir) = pre_checkpoint_datadir {
         let store = GoStore::open(pre_checkpoint_datadir)?;
+        print_info("Trust model: operator-supplied pre-checkpoint store");
         print_success("Loaded external pre-checkpoint store");
         print_info(&format!(
             "Pre-checkpoint store path: {}",
@@ -434,6 +443,9 @@ where
         PreCheckpointSource::External(store)
     } else {
         let store = CheckpointStore::from_embedded_json()?;
+        print_info(
+            "Trust model: embedded pre-checkpoint data by default (override with --pre-checkpoint-datadir PATH)",
+        );
         print_success("Loaded embedded checkpoint_data.json");
         print_info("(No 1GB pre-checkpoint database download required)");
         PreCheckpointSource::Embedded(store)
@@ -562,6 +574,133 @@ where
                 Some("original genesis header not found in checkpoint dataset".to_string());
             return Ok(false);
         }
+
+        print_header("Step 8: Checkpoint UTXO Dump Verification");
+        if let Some(path) = checkpoint_utxos_gz {
+            print_info("Trust model: operator-supplied checkpoint UTXO dump");
+            print_info(&format!(
+                "Using operator-supplied checkpoint utxos.gz: {}",
+                path.display()
+            ));
+            print_info(&format!(
+                "Canonical upstream reference: {CHECKPOINT_UTXO_DUMP_SOURCE_URL}"
+            ));
+        } else {
+            print_info(
+                "Trust model: embedded checkpoint dump by default (override with --checkpoint-utxos-gz PATH)",
+            );
+            print_info(&format!(
+                "Using embedded canonical checkpoint dump: {CHECKPOINT_UTXO_DUMP_SOURCE_LABEL}"
+            ));
+            print_info(&format!(
+                "Canonical upstream reference: {CHECKPOINT_UTXO_DUMP_SOURCE_URL}"
+            ));
+        }
+        print_info(
+            "Streaming the selected checkpoint dump through MuHash and the Go-format UTXO parser...",
+        );
+
+        let checkpoint_dump = match verify_checkpoint_utxo_dump(
+            checkpoint_header.utxo_commitment,
+            checkpoint_utxos_gz,
+        ) {
+            Ok(scan) => scan,
+            Err(err) => {
+                print_error(&format!(
+                    "Checkpoint UTXO dump verification failed: {err:#}"
+                ));
+                report.error = Some("checkpoint UTXO dump verification failed".to_string());
+                return Ok(false);
+            }
+        };
+        let checkpoint_scan = checkpoint_dump.scan;
+        let source_label = checkpoint_dump.source_label;
+        let source_url = checkpoint_dump.source_url;
+        let used_operator_supplied_file = checkpoint_dump.used_operator_supplied_file;
+
+        let reference_baseline = match reference_baseline_sompi(checkpoint_header.daa_score) {
+            Ok(value) => value,
+            Err(err) => {
+                print_error(&format!(
+                    "Failed computing checkpoint reference baseline: {err:#}"
+                ));
+                report.error = Some("checkpoint reference baseline calculation failed".to_string());
+                return Ok(false);
+            }
+        };
+        let checkpoint_excess = match checkpoint_scan.total_sompi.checked_sub(reference_baseline) {
+            Some(value) => value,
+            None => {
+                print_error(
+                    "Checkpoint total is unexpectedly below the reference emission schedule",
+                );
+                report.error =
+                    Some("checkpoint total below reference emission schedule".to_string());
+                return Ok(false);
+            }
+        };
+
+        print_info(&format!(
+            "Compressed dump size: {} bytes",
+            format_sompi_amount(
+                u64::try_from(checkpoint_scan.compressed_size_bytes)
+                    .expect("checkpoint dump size fits in u64")
+            )
+        ));
+        print_info(&format!(
+            "Framed UTXO records: {}",
+            format_sompi_amount(checkpoint_scan.record_count)
+        ));
+        print_info(&format!(
+            "Computed MuHash:      {}",
+            hex_of(&checkpoint_scan.commitment)
+        ));
+        print_info(&format!(
+            "Expected commitment:  {}",
+            hex_of(&checkpoint_header.utxo_commitment)
+        ));
+        print_success("Checkpoint dump MuHash matches the checkpoint header UTXO commitment");
+        if active_genesis_hash == hardwired_genesis {
+            print_success(
+                "Checkpoint dump MuHash is the same commitment carried by the hardwired genesis",
+            );
+        }
+        if used_operator_supplied_file {
+            print_success(
+                "Operator-supplied checkpoint dump verified against the hardwired commitment",
+            );
+        }
+        print_success(&format!(
+            "Verified checkpoint total: {} sompi",
+            format_sompi_amount(checkpoint_scan.total_sompi)
+        ));
+        print_success(&format!(
+            "Verified checkpoint total: {} KAS",
+            format_kas_amount_from_sompi(checkpoint_scan.total_sompi)
+        ));
+        print_info(&format!(
+            "Reference schedule at checkpoint DAA {}: {} KAS",
+            checkpoint_header.daa_score,
+            format_kas_amount_from_sompi(reference_baseline)
+        ));
+        print_info(&format!(
+            "Excess over 500 KAS reference schedule: {} KAS",
+            format_kas_amount_from_sompi(checkpoint_excess)
+        ));
+
+        report.checkpoint_utxo_dump_verified = true;
+        report.checkpoint_utxo_dump_source = Some(source_label);
+        report.checkpoint_utxo_dump_source_url = Some(source_url.to_string());
+        report.checkpoint_utxo_dump_records = Some(checkpoint_scan.record_count);
+        report.checkpoint_utxo_commitment = Some(hex_of(&checkpoint_scan.commitment));
+        report.checkpoint_daa_score = Some(checkpoint_header.daa_score);
+        report.checkpoint_total_sompi = Some(checkpoint_scan.total_sompi.to_string());
+        report.checkpoint_total_kas =
+            Some(format_kas_amount_from_sompi(checkpoint_scan.total_sompi));
+        report.checkpoint_reference_baseline_kas =
+            Some(format_kas_amount_from_sompi(reference_baseline));
+        report.checkpoint_excess_over_reference_kas =
+            Some(format_kas_amount_from_sompi(checkpoint_excess));
     } else {
         print_error("Checkpoint header not found in checkpoint dataset");
         report.error = Some("checkpoint header not found in checkpoint dataset".to_string());
@@ -583,6 +722,8 @@ where
     print_info("  ✓ Hash chain from current tip to genesis verified");
     print_info("  ✓ UTXO commitment analysis completed");
     print_info("  ✓ Pre-checkpoint verification completed");
+    print_info("  ✓ Checkpoint UTXO dump MuHash verified");
+    print_info("  ✓ Checkpoint total supply verified from canonical dump");
     print_info("  ✓ Original genesis coinbase transaction verified");
     print_info("  ✓ Original genesis empty UTXO set verified");
 
@@ -606,6 +747,7 @@ pub(crate) fn run(cli: &Cli, report: &mut VerificationReport) -> Result<bool> {
         &mut *store,
         &input_path,
         cli.pre_checkpoint_datadir.as_deref(),
+        cli.checkpoint_utxos_gz.as_deref(),
         &probe_notes,
         cli.verbose,
         cli.no_input,
@@ -868,6 +1010,7 @@ mod tests {
             &mut store,
             Path::new("/tmp/fake-input"),
             None,
+            None,
             &["probe note".to_string()],
             false,
             false,
@@ -880,6 +1023,15 @@ mod tests {
         assert_eq!(report.genesis_mode.as_deref(), Some("hardwired"));
         assert_eq!(report.tips_count, Some(1));
         assert_eq!(report.store_type.as_deref(), Some("Fake test store"));
+        assert!(report.checkpoint_utxo_dump_verified);
+        assert_eq!(
+            report.checkpoint_total_sompi.as_deref(),
+            Some("98422254404487171")
+        );
+        assert_eq!(
+            report.checkpoint_total_kas.as_deref(),
+            Some("984,222,544.04487171")
+        );
         assert_eq!(report.error, None);
         assert_eq!(report.tips.len(), 1);
     }
@@ -896,6 +1048,7 @@ mod tests {
         let result = verify_genesis_with_prompt(
             &mut store,
             Path::new("/tmp/fake-input"),
+            None,
             None,
             &[],
             false,
@@ -942,6 +1095,7 @@ mod tests {
             &mut current_store,
             Path::new("/tmp/fake-input"),
             Some(db_path.as_path()),
+            None,
             &[],
             false,
             true,
@@ -978,6 +1132,7 @@ mod tests {
         let result = verify_genesis_with_prompt(
             &mut store,
             Path::new("/tmp/fake-input"),
+            None,
             None,
             &[],
             false,
@@ -1029,6 +1184,7 @@ mod tests {
             &mut store,
             Path::new("/tmp/fake-input"),
             None,
+            None,
             &[],
             false,
             false,
@@ -1076,6 +1232,7 @@ mod tests {
             &mut store,
             Path::new("/tmp/fake-input"),
             None,
+            None,
             &[],
             false,
             false,
@@ -1119,6 +1276,7 @@ mod tests {
             &mut store,
             Path::new("/tmp/fake-input"),
             None,
+            None,
             &[],
             false,
             false,
@@ -1158,6 +1316,7 @@ mod tests {
         let result = verify_genesis_with_prompt(
             &mut store,
             Path::new("/tmp/fake-input"),
+            None,
             None,
             &[],
             false,
@@ -1201,6 +1360,7 @@ mod tests {
             &mut store,
             Path::new("/tmp/fake-input"),
             None,
+            None,
             &[],
             false,
             false,
@@ -1240,6 +1400,7 @@ mod tests {
         let result = verify_genesis_with_prompt(
             &mut store,
             Path::new("/tmp/fake-input"),
+            None,
             None,
             &[],
             false,

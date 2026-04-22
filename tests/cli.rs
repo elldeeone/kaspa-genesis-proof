@@ -315,6 +315,10 @@ fn binary_writes_json_report_for_go_fixture() {
     let report_path = tempdir.path().join("report.json");
     let datadir = fixture.root.to_string_lossy().into_owned();
     let report_arg = report_path.to_string_lossy().into_owned();
+    let checkpoint_utxos = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("kaspad-v0.11.5-2-utxos.gz");
+    let checkpoint_utxos_arg = checkpoint_utxos.to_string_lossy().into_owned();
 
     let output = run_binary(
         &[
@@ -322,6 +326,8 @@ fn binary_writes_json_report_for_go_fixture() {
             "go",
             "--datadir",
             &datadir,
+            "--checkpoint-utxos-gz",
+            &checkpoint_utxos_arg,
             "--no-input",
             "--json-out",
             &report_arg,
@@ -338,6 +344,13 @@ fn binary_writes_json_report_for_go_fixture() {
 
     let stdout = stdout_text(&output);
     assert!(stdout.contains("The Kaspa blockchain integrity has been verified"));
+    assert!(stdout.contains("Trust model: embedded pre-checkpoint data by default"));
+    assert!(stdout.contains("Trust model: operator-supplied checkpoint UTXO dump"));
+    assert!(stdout.contains("Using operator-supplied checkpoint utxos.gz:"));
+    assert!(
+        stdout.contains("Checkpoint dump MuHash matches the checkpoint header UTXO commitment")
+    );
+    assert!(stdout.contains("Verified checkpoint total: 984,222,544.04487171 KAS"));
     assert!(stdout.contains("JSON report written to"));
 
     let report: Value = serde_json::from_slice(&fs::read(&report_path).expect("read report json"))
@@ -356,6 +369,19 @@ fn binary_writes_json_report_for_go_fixture() {
     assert_eq!(
         report["resolved_db_path"],
         Value::String(fixture.expected_db_path.display().to_string())
+    );
+    assert_eq!(
+        report["checkpoint_utxos_gz"],
+        Value::String(checkpoint_utxos.display().to_string())
+    );
+    assert_eq!(report["checkpoint_utxo_dump_verified"], Value::Bool(true));
+    assert_eq!(
+        report["checkpoint_total_sompi"],
+        Value::String("98422254404487171".to_string())
+    );
+    assert_eq!(
+        report["checkpoint_total_kas"],
+        Value::String("984,222,544.04487171".to_string())
     );
     assert_eq!(
         report["chain_tip_used"],
@@ -393,6 +419,8 @@ fn binary_no_input_skips_prompts_and_does_not_auto_export_json() {
         stdout
             .contains("Sync advisory prompt skipped due to --no-input; continuing automatically.")
     );
+    assert!(stdout.contains("Trust model: embedded pre-checkpoint data by default"));
+    assert!(stdout.contains("Trust model: embedded checkpoint dump by default"));
     assert!(!stdout.contains("Do you want to export this verification to JSON?"));
     assert!(!stdout.contains("JSON report written to"));
 

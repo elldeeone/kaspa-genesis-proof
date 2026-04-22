@@ -115,6 +115,10 @@ pub(crate) fn build_initial_report(cli: &Cli) -> VerificationReport {
             .pre_checkpoint_datadir
             .as_ref()
             .map(|p| p.display().to_string()),
+        checkpoint_utxos_gz: cli
+            .checkpoint_utxos_gz
+            .as_ref()
+            .map(|p| p.display().to_string()),
         ..VerificationReport::default()
     }
 }
