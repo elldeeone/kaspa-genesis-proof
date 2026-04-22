@@ -86,6 +86,13 @@ struct Cli {
     #[arg(
         long,
         value_name = "PATH",
+        help = "Optional pre-checkpoint Go datadir to reproduce the notebook's external checkpoint/original-genesis verification path"
+    )]
+    pre_checkpoint_datadir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "PATH",
         help = "Write a JSON verification report to this path without prompting (parent directories are created as needed)"
     )]
     json_out: Option<PathBuf>,
@@ -284,7 +291,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::error::ErrorKind;
     use prost::Message;
     use rocksdb::{DB as RocksDb, Options as RocksOptions};
     use rusty_leveldb::{DB as LevelDb, Options as LevelOptions};
@@ -729,6 +735,31 @@ mod tests {
     }
 
     #[test]
+    fn rust_store_tips_preserves_iterator_order_without_hash_sorting() {
+        let (_tempdir, datadir, consensus_root) = create_temp_datadir();
+        let db_path = consensus_root.join("consensus-002");
+        let headers_selected_tip = test_hash(0x77);
+        let length_prefixed_tip = test_hash(0x01);
+        let raw_tip = test_hash(0x90);
+        let mut encoded_prefixed_tip = Vec::from(32u64.to_le_bytes());
+        encoded_prefixed_tip.extend_from_slice(&length_prefixed_tip);
+
+        create_consensus_db(
+            &db_path,
+            &[
+                (vec![7u8], headers_selected_tip.to_vec()),
+                ([vec![24u8], raw_tip.to_vec()].concat(), Vec::new()),
+                ([vec![24u8], encoded_prefixed_tip].concat(), Vec::new()),
+            ],
+        );
+
+        let mut store = RustStore::open(&datadir).expect("open rust store");
+        let (tips, _hst) = store.tips().expect("read tips");
+
+        assert_eq!(tips, vec![length_prefixed_tip, raw_tip]);
+    }
+
+    #[test]
     fn rust_store_tips_returns_empty_list_when_tip_store_is_empty() {
         let (_tempdir, _datadir, consensus_root) = create_temp_datadir();
         let db_path = consensus_root.join("consensus-002");
@@ -874,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn go_store_tips_falls_back_to_selected_tip_when_proto_tip_set_is_empty() {
+    fn go_store_tips_preserves_empty_proto_tip_set() {
         let tempdir = TempDir::new().expect("tempdir");
         let db_path = tempdir.path().join("datadir2");
         let active_prefix = 0u8;
@@ -899,7 +930,7 @@ mod tests {
         let (tips, hst) = store.tips().expect("tips");
 
         assert_eq!(hst, selected_tip);
-        assert_eq!(tips, vec![selected_tip]);
+        assert!(tips.is_empty());
     }
 
     #[test]
@@ -927,6 +958,7 @@ mod tests {
         let cli = Cli {
             node_type: CliNodeType::Auto,
             datadir: Some(db_path.clone()),
+            pre_checkpoint_datadir: None,
             json_out: None,
             verbose: false,
             no_input: true,
@@ -957,15 +989,17 @@ mod tests {
     }
 
     #[test]
-    fn cli_rejects_removed_pre_checkpoint_datadir_flag() {
-        let err = Cli::try_parse_from([
+    fn cli_accepts_pre_checkpoint_datadir_flag() {
+        let cli = Cli::try_parse_from([
             "rust-native-verifier",
             "--pre-checkpoint-datadir",
             "/tmp/pre-checkpoint",
         ])
-        .expect_err("removed flag should be rejected");
+        .expect("parse cli");
 
-        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
-        assert!(err.to_string().contains("--pre-checkpoint-datadir"));
+        assert_eq!(
+            cli.pre_checkpoint_datadir,
+            Some(PathBuf::from("/tmp/pre-checkpoint"))
+        );
     }
 }

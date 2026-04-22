@@ -111,6 +111,10 @@ pub(crate) fn build_initial_report(cli: &Cli) -> VerificationReport {
         generated_at_unix_ms: now_millis().unwrap_or(0),
         requested_node_type: cli_node_type_label(cli.node_type).to_string(),
         provided_datadir: cli.datadir.as_ref().map(|p| p.display().to_string()),
+        pre_checkpoint_datadir: cli
+            .pre_checkpoint_datadir
+            .as_ref()
+            .map(|p| p.display().to_string()),
         ..VerificationReport::default()
     }
 }

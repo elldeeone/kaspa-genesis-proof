@@ -65,6 +65,7 @@ pub(crate) struct VerificationReport {
     pub(crate) success: bool,
     pub(crate) requested_node_type: String,
     pub(crate) provided_datadir: Option<String>,
+    pub(crate) pre_checkpoint_datadir: Option<String>,
     pub(crate) resolved_input_path: Option<String>,
     pub(crate) resolved_db_path: Option<String>,
     pub(crate) store_type: Option<String>,

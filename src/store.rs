@@ -79,7 +79,8 @@ impl HeaderStore for RustStore {
             );
         };
 
-        let mut tips_set = BTreeSet::new();
+        let mut seen_tips = BTreeSet::new();
+        let mut tips = Vec::new();
         let iter = self
             .db
             .iterator(IteratorMode::From(&[24u8], Direction::Forward));
@@ -89,11 +90,12 @@ impl HeaderStore for RustStore {
                 break;
             }
             if let Some(hash) = decode_tip_hash_from_key_suffix(&key[1..]) {
-                tips_set.insert(hash);
+                if seen_tips.insert(hash) {
+                    tips.push(hash);
+                }
             }
         }
 
-        let tips = tips_set.into_iter().collect::<Vec<_>>();
         Ok((tips, hst))
     }
 }
@@ -281,10 +283,6 @@ impl HeaderStore for GoStore {
         let mut tips = Vec::with_capacity(db_tips.tips.len());
         for t in db_tips.tips {
             tips.push(to_hash32(&t.hash).context("invalid tip hash length")?);
-        }
-
-        if tips.is_empty() {
-            tips.push(hst);
         }
 
         Ok((tips, hst))
