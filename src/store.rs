@@ -6,6 +6,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 use crate::hashing::{
     decode_rust_header, decode_tip_hash_from_key_suffix, hash32_from_hex, to_hash32,
@@ -357,6 +359,7 @@ impl CheckpointStore {
 }
 
 fn open_rocksdb_read_only(path: &Path) -> Result<RocksDb> {
+    const ROCKSDB_OPEN_ATTEMPTS: usize = 4;
     let mut opts = RocksOptions::default();
     opts.create_if_missing(false);
     // Keep verifier FD usage bounded so it can run alongside a live node.
@@ -366,8 +369,36 @@ fn open_rocksdb_read_only(path: &Path) -> Result<RocksDb> {
         Box::new(|a: &[u8], b: &[u8]| a.cmp(b)),
     );
 
-    RocksDb::open_for_read_only(&opts, path, false)
-        .with_context(|| format!("failed opening RocksDB at {}", path.display()))
+    let mut last_err_text = None;
+    for attempt in 0..ROCKSDB_OPEN_ATTEMPTS {
+        match RocksDb::open_for_read_only(&opts, path, false) {
+            Ok(db) => return Ok(db),
+            Err(err) => {
+                let err_text = err.to_string();
+                let should_retry = attempt + 1 < ROCKSDB_OPEN_ATTEMPTS
+                    && is_transient_rocksdb_open_failure(&err_text);
+                if should_retry {
+                    last_err_text = Some(err_text);
+                    thread::sleep(Duration::from_millis(200 * (attempt as u64 + 1)));
+                    continue;
+                }
+
+                return Err(err)
+                    .with_context(|| format!("failed opening RocksDB at {}", path.display()));
+            }
+        }
+    }
+
+    bail!(
+        "failed opening RocksDB at {} after {} attempts: {}",
+        path.display(),
+        ROCKSDB_OPEN_ATTEMPTS,
+        last_err_text.unwrap_or_else(|| "unknown RocksDB open failure".to_string())
+    )
+}
+
+pub(crate) fn is_transient_rocksdb_open_failure(err_text: &str) -> bool {
+    err_text.contains(".sst") && err_text.contains("No such file or directory")
 }
 
 fn validate_rust_consensus_db(db: &RocksDb, path: &Path) -> Result<()> {

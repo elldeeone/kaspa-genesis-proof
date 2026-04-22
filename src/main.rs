@@ -302,8 +302,8 @@ mod tests {
         decode_tip_hash_from_key_suffix, hash32_from_hex, header_hash, hex_of, transaction_hash,
     };
     use crate::store::{
-        open_store_with_resolved_input, parse_consensus_entry_dir_name,
-        parse_current_consensus_key, resolve_rust_db_path,
+        is_transient_rocksdb_open_failure, open_store_with_resolved_input,
+        parse_consensus_entry_dir_name, parse_current_consensus_key, resolve_rust_db_path,
     };
     use crate::verify::{hardwired_genesis_coinbase_tx, original_genesis_coinbase_tx};
 
@@ -772,6 +772,15 @@ mod tests {
 
         assert_eq!(hst, headers_selected_tip);
         assert!(tips.is_empty());
+    }
+
+    #[test]
+    fn detects_transient_rocksdb_open_failures_from_missing_sst_files() {
+        let err = "Corruption: Can't access /5174030.sst: IO error: No such file or directory";
+        assert!(is_transient_rocksdb_open_failure(err));
+        assert!(!is_transient_rocksdb_open_failure(
+            "IO error: lock hold by current process"
+        ));
     }
 
     #[test]
