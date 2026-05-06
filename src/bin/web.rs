@@ -677,14 +677,31 @@ const INDEX_HTML: &str = r##"<!doctype html>
       gap: 18px;
       align-items: start;
     }
-    .summary, pre {
+    .summary, .report-panel {
       border: 2px solid var(--line);
       background: var(--field);
     }
     .summary {
       min-height: 160px;
       padding: 18px;
-      font: 15px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      overflow-wrap: anywhere;
+    }
+    .summary-row {
+      display: grid;
+      grid-template-columns: 92px minmax(0, 1fr);
+      gap: 10px;
+      margin-top: 8px;
+    }
+    .summary-row .label {
+      color: var(--muted);
+      text-transform: uppercase;
+      font-size: 11px;
+      line-height: 1.7;
+    }
+    .summary-row .value {
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     .badge {
       display: inline-block;
@@ -695,19 +712,81 @@ const INDEX_HTML: &str = r##"<!doctype html>
     }
     .badge.ok { color: var(--ok); }
     .badge.bad { color: var(--bad); }
-    pre {
+    .report-panel {
       min-height: 360px;
       max-height: 60vh;
       overflow: auto;
       margin: 0;
       padding: 18px;
+      font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .report-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .metric {
+      border: 1px solid rgba(40, 32, 24, .45);
+      padding: 12px;
+      background: rgba(255, 255, 255, .38);
+    }
+    .metric .label, .section-title {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1;
+      text-transform: uppercase;
+      letter-spacing: 0;
+      font-weight: 800;
+    }
+    .metric .value {
+      margin-top: 8px;
+      font-size: 16px;
+      font-weight: 900;
+      overflow-wrap: anywhere;
+    }
+    .report-section {
+      border-top: 1px solid rgba(40, 32, 24, .35);
+      padding-top: 14px;
+      margin-top: 14px;
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: minmax(150px, .32fr) minmax(0, 1fr);
+      gap: 10px;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(40, 32, 24, .12);
+    }
+    .kv:last-child { border-bottom: 0; }
+    .kv .key {
+      color: var(--muted);
+      text-transform: uppercase;
+      font-size: 11px;
+      line-height: 1.6;
+    }
+    .kv .val {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .tips-list {
+      display: grid;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .tip-hash {
+      overflow-wrap: anywhere;
+      padding: 8px;
+      background: rgba(40, 32, 24, .055);
+      border-left: 3px solid var(--accent);
+    }
+    .log {
       white-space: pre-wrap;
-      word-break: break-word;
-      font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      overflow-wrap: anywhere;
     }
     @media (max-width: 800px) {
       header, form, .result { grid-template-columns: 1fr; }
       h1 { font-size: clamp(44px, 18vw, 78px); }
+      .report-grid, .kv, .summary-row { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -716,7 +795,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <header>
       <div>
         <h1>Kaspa Genesis Proof</h1>
-        <p class="lede">Connect to your node briefly for live chain state, then verify against this backend's warmed genesis proof cache.</p>
+        <p class="lede">Verifies your Kaspa node's current state back to genesis.</p>
       </div>
       <aside class="status-strip">
         <b>Required forward</b>
@@ -742,7 +821,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
     <section class="result">
       <div class="summary" id="summary">Waiting for a node.</div>
-      <pre id="report">{}</pre>
+      <div class="report-panel" id="report">No report yet.</div>
     </section>
   </main>
 
@@ -756,21 +835,79 @@ const INDEX_HTML: &str = r##"<!doctype html>
     let latestReport = null;
     let activeJobId = null;
 
+    function escapeHtml(value) {
+      return String(value ?? "n/a")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function shortHash(value) {
+      if (!value) return "n/a";
+      return value.length > 22 ? `${value.slice(0, 14)}...${value.slice(-8)}` : value;
+    }
+
+    function kv(label, value) {
+      return `<div class="kv"><div class="key">${escapeHtml(label)}</div><div class="val">${escapeHtml(value)}</div></div>`;
+    }
+
+    function metric(label, value) {
+      return `<div class="metric"><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(value)}</div></div>`;
+    }
+
     function setSummary(report) {
       const ok = report && report.success;
-      const lines = [
+      summary.innerHTML = [
         `<span class="badge ${ok ? "ok" : "bad"}">${ok ? "PASSED" : "FAILED"}</span>`,
-        `tips: ${report.tips_count ?? "n/a"}`,
-        `tip: ${report.chain_tip_used ?? "n/a"}`,
-        `checkpoint total: ${report.checkpoint_total_kas ?? "n/a"}`,
-        `error: ${report.error ?? "none"}`
-      ];
-      summary.innerHTML = lines.join("<br>");
+        `<div class="summary-row"><div class="label">Tips</div><div class="value">${escapeHtml(report.tips_count ?? "n/a")}</div></div>`,
+        `<div class="summary-row"><div class="label">Tip</div><div class="value" title="${escapeHtml(report.chain_tip_used ?? "")}">${escapeHtml(shortHash(report.chain_tip_used))}</div></div>`,
+        `<div class="summary-row"><div class="label">Total</div><div class="value">${escapeHtml(report.checkpoint_total_kas ?? "n/a")}</div></div>`,
+        `<div class="summary-row"><div class="label">Error</div><div class="value">${escapeHtml(report.error ?? "none")}</div></div>`
+      ].join("");
+    }
+
+    function renderReport(report) {
+      if (!report) return "No report yet.";
+      const tips = Array.isArray(report.tips) && report.tips.length
+        ? `<div class="tips-list">${report.tips.map((tip) => `<div class="tip-hash">${escapeHtml(tip)}</div>`).join("")}</div>`
+        : `<div class="tip-hash">n/a</div>`;
+      return `
+        <div class="report-grid">
+          ${metric("Result", report.success ? "Passed" : "Failed")}
+          ${metric("Tips", report.tips_count ?? "n/a")}
+          ${metric("Checkpoint Total", report.checkpoint_total_kas ?? "n/a")}
+        </div>
+        <div class="report-section">
+          <div class="section-title">Chain State</div>
+          ${kv("Selected Tip", report.chain_tip_used)}
+          ${kv("Active Genesis", report.active_genesis_hash)}
+          ${kv("Resolved Node", report.resolved_db_path || report.resolved_input_path)}
+          ${kv("Store Type", report.store_type)}
+          ${kv("Tip Age", report.tip_age_ms != null ? `${Math.round(report.tip_age_ms / 1000)}s` : "n/a")}
+        </div>
+        <div class="report-section">
+          <div class="section-title">Checkpoint</div>
+          ${kv("Dump Verified", report.checkpoint_utxo_dump_verified ? "yes" : "no")}
+          ${kv("Records", report.checkpoint_utxo_dump_records)}
+          ${kv("Commitment", report.checkpoint_utxo_commitment)}
+          ${kv("DAA Score", report.checkpoint_daa_score)}
+          ${kv("Reference Baseline", report.checkpoint_reference_baseline_kas)}
+          ${kv("Excess Over Reference", report.checkpoint_excess_over_reference_kas)}
+          ${kv("Source", report.checkpoint_utxo_dump_source)}
+        </div>
+        <div class="report-section">
+          <div class="section-title">Tips</div>
+          ${tips}
+        </div>
+        ${report.error ? `<div class="report-section">${kv("Error", report.error)}</div>` : ""}
+      `;
     }
 
     function setReport(report) {
       latestReport = report;
-      reportBox.textContent = JSON.stringify(report, null, 2);
+      reportBox.innerHTML = renderReport(report);
       copyReport.disabled = !report;
       downloadReport.disabled = !report;
     }
@@ -782,9 +919,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         : 0;
       const state = (status.status || "queued").replaceAll("_", " ");
       summary.textContent = `${state}. Elapsed ${elapsed}s.`;
-      reportBox.textContent = lines.length
-        ? lines.join("\n")
-        : "Waiting for verifier output...";
+      reportBox.innerHTML = `<div class="log">${escapeHtml(lines.length ? lines.join("\n") : "Waiting for verifier output...")}</div>`;
     }
 
     async function fetchJson(url, options) {
@@ -812,7 +947,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         if (status.status === "completed" || status.status === "failed") {
           if (status.error) throw new Error(status.error);
           summary.textContent = "Finalizing report.";
-          reportBox.textContent = (status.lines || []).join("\n") || "Finalizing report.";
+          reportBox.innerHTML = `<div class="log">${escapeHtml((status.lines || []).join("\n") || "Finalizing report.")}</div>`;
         } else if (status.error && status.status !== "running" && status.status !== "queued") {
           throw new Error(status.error);
         } else {
@@ -828,7 +963,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
       copyReport.disabled = true;
       downloadReport.disabled = true;
       summary.textContent = "Starting verifier job.";
-      reportBox.textContent = "Submitting request...";
+      reportBox.innerHTML = `<div class="log">Submitting request...</div>`;
       activeJobId = null;
       const fields = new FormData(form);
       const body = {
