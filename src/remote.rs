@@ -49,6 +49,10 @@ pub fn run_remote_proof(options: RemoteProofOptions) -> VerificationReport {
     report
 }
 
+pub fn current_remote_proof_output_lines() -> Vec<String> {
+    output_capture_snapshot()
+}
+
 pub fn warm_up_remote_proof_caches() -> Result<()> {
     scan_embedded_checkpoint_utxo_dump()?;
     Ok(())

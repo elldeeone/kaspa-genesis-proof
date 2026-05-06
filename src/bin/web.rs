@@ -1,19 +1,20 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use genesis_proof::{
-    RemoteProofOptions, VerificationReport, refresh_remote_pruning_proof_cache_from_p2p,
-    run_remote_proof, seed_remote_pruning_proof_cache_from_p2p, warm_up_remote_proof_caches,
+    RemoteProofOptions, VerificationReport, current_remote_proof_output_lines,
+    refresh_remote_pruning_proof_cache_from_p2p, run_remote_proof,
+    seed_remote_pruning_proof_cache_from_p2p, warm_up_remote_proof_caches,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
@@ -35,12 +36,35 @@ struct AppState {
     default_rpc_port: u16,
     proof_source_addr: String,
     proof_lock: Arc<Mutex<()>>,
+    jobs: Arc<Mutex<HashMap<String, ProofJob>>>,
+    next_job_id: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct VerifyRequest {
     host: String,
     rpc_port: Option<u16>,
+}
+
+#[derive(Clone, Debug)]
+struct ProofJob {
+    status: ProofJobStatus,
+    host: String,
+    rpc_port: u16,
+    started_at_unix_ms: u64,
+    updated_at_unix_ms: u64,
+    lines: Vec<String>,
+    report: Option<VerificationReport>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ProofJobStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
 }
 
 #[tokio::main]
@@ -52,10 +76,13 @@ async fn main() -> anyhow::Result<()> {
         default_rpc_port: 16110,
         proof_source_addr,
         proof_lock: Arc::new(Mutex::new(())),
+        jobs: Arc::new(Mutex::new(HashMap::new())),
+        next_job_id: Arc::new(AtomicU64::new(1)),
     };
     let app = Router::new()
         .route("/", get(index))
         .route("/api/verify", post(verify))
+        .route("/api/verify/{job_id}", get(verify_status))
         .with_state(state);
 
     let addr: SocketAddr = std::env::var("KASPA_PROOF_WEB_ADDR")
@@ -249,6 +276,195 @@ async fn index() -> Html<&'static str> {
 }
 
 async fn verify(
+    State(state): State<AppState>,
+    Json(request): Json<VerifyRequest>,
+) -> impl IntoResponse {
+    let host = request.host.trim().to_string();
+    if host.is_empty() || host.len() > 255 || host.contains("://") || host.contains('/') {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(StartVerifyResponse::error(
+                "enter a bare host or IP address",
+            )),
+        );
+    }
+
+    let rpc_port = request.rpc_port.unwrap_or(state.default_rpc_port);
+    let job_id = state
+        .next_job_id
+        .fetch_add(1, Ordering::Relaxed)
+        .to_string();
+    let now = now_unix_ms();
+    {
+        let mut jobs = state.jobs.lock().await;
+        jobs.insert(
+            job_id.clone(),
+            ProofJob {
+                status: ProofJobStatus::Queued,
+                host: host.clone(),
+                rpc_port,
+                started_at_unix_ms: now,
+                updated_at_unix_ms: now,
+                lines: vec!["Queued. Waiting for the verifier worker.".to_string()],
+                report: None,
+                error: None,
+            },
+        );
+    }
+
+    spawn_verify_job(state, job_id.clone(), host, rpc_port);
+
+    (
+        StatusCode::ACCEPTED,
+        Json(StartVerifyResponse {
+            job_id: Some(job_id),
+            error: None,
+        }),
+    )
+}
+
+async fn verify_status(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> impl IntoResponse {
+    let mut jobs = state.jobs.lock().await;
+    let Some(job) = jobs.get_mut(&job_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(VerifyStatusResponse::error("verification job not found")),
+        );
+    };
+
+    if matches!(job.status, ProofJobStatus::Running) {
+        job.lines = current_remote_proof_output_lines();
+        job.updated_at_unix_ms = now_unix_ms();
+    }
+
+    (
+        StatusCode::OK,
+        Json(VerifyStatusResponse {
+            job_id: Some(job_id),
+            status: Some(job.status),
+            host: Some(job.host.clone()),
+            rpc_port: Some(job.rpc_port),
+            started_at_unix_ms: Some(job.started_at_unix_ms),
+            updated_at_unix_ms: Some(job.updated_at_unix_ms),
+            lines: job.lines.clone(),
+            report: job.report.clone(),
+            error: job.error.clone(),
+        }),
+    )
+}
+
+fn spawn_verify_job(state: AppState, job_id: String, host: String, rpc_port: u16) {
+    tokio::spawn(async move {
+        let rpc_url = format!("grpc://{host}:{rpc_port}");
+        let p2p_addr = state.proof_source_addr.clone();
+        let proof_lock = Arc::clone(&state.proof_lock);
+        let jobs = Arc::clone(&state.jobs);
+
+        let _proof_guard = proof_lock.lock().await;
+        update_job(&jobs, &job_id, |job| {
+            job.status = ProofJobStatus::Running;
+            job.lines = vec!["Connected to verifier worker. Starting proof.".to_string()];
+            job.updated_at_unix_ms = now_unix_ms();
+        })
+        .await;
+
+        let report = tokio::task::spawn_blocking(move || {
+            run_remote_proof(RemoteProofOptions {
+                rpc_url,
+                p2p_addr: Some(p2p_addr),
+                pre_checkpoint_datadir: None,
+                checkpoint_utxos_gz: None,
+            })
+        })
+        .await
+        .unwrap_or_else(|err| VerificationReport {
+            success: false,
+            error: Some(format!("proof worker failed: {err}")),
+            ..VerificationReport::default()
+        });
+
+        update_job(&jobs, &job_id, |job| {
+            job.status = if report.success {
+                ProofJobStatus::Completed
+            } else {
+                ProofJobStatus::Failed
+            };
+            job.updated_at_unix_ms = now_unix_ms();
+            job.lines = report.screen_output_lines.clone();
+            job.error = report.error.clone();
+            job.report = Some(report);
+        })
+        .await;
+    });
+}
+
+async fn update_job(
+    jobs: &Arc<Mutex<HashMap<String, ProofJob>>>,
+    job_id: &str,
+    update: impl FnOnce(&mut ProofJob),
+) {
+    let mut jobs = jobs.lock().await;
+    if let Some(job) = jobs.get_mut(job_id) {
+        update(job);
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[derive(Serialize)]
+struct StartVerifyResponse {
+    job_id: Option<String>,
+    error: Option<String>,
+}
+
+impl StartVerifyResponse {
+    fn error(message: &str) -> Self {
+        Self {
+            job_id: None,
+            error: Some(message.to_string()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct VerifyStatusResponse {
+    job_id: Option<String>,
+    status: Option<ProofJobStatus>,
+    host: Option<String>,
+    rpc_port: Option<u16>,
+    started_at_unix_ms: Option<u64>,
+    updated_at_unix_ms: Option<u64>,
+    lines: Vec<String>,
+    report: Option<VerificationReport>,
+    error: Option<String>,
+}
+
+impl VerifyStatusResponse {
+    fn error(message: &str) -> Self {
+        Self {
+            job_id: None,
+            status: None,
+            host: None,
+            rpc_port: None,
+            started_at_unix_ms: None,
+            updated_at_unix_ms: None,
+            lines: Vec::new(),
+            report: None,
+            error: Some(message.to_string()),
+        }
+    }
+}
+
+#[allow(dead_code)]
+async fn verify_legacy(
     State(state): State<AppState>,
     Json(request): Json<VerifyRequest>,
 ) -> impl IntoResponse {
@@ -519,27 +735,66 @@ const INDEX_HTML: &str = r##"<!doctype html>
       downloadReport.disabled = !report;
     }
 
+    function setProgress(status) {
+      const lines = status.lines || [];
+      const elapsed = status.started_at_unix_ms
+        ? Math.max(0, Math.round((Date.now() - status.started_at_unix_ms) / 1000))
+        : 0;
+      const state = (status.status || "queued").replaceAll("_", " ");
+      summary.textContent = `${state}. Elapsed ${elapsed}s.`;
+      reportBox.textContent = lines.length
+        ? lines.join("\n")
+        : "Waiting for verifier output...";
+    }
+
+    async function fetchJson(url, options) {
+      const response = await fetch(url, options);
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      return payload;
+    }
+
+    function wait(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    async function pollJob(jobId) {
+      while (true) {
+        const status = await fetchJson(`/api/verify/${encodeURIComponent(jobId)}`);
+        if (status.report) {
+          setSummary(status.report);
+          setReport(status.report);
+          return;
+        }
+        if (status.error && status.status !== "running" && status.status !== "queued") {
+          throw new Error(status.error);
+        }
+        setProgress(status);
+        await wait(1500);
+      }
+    }
+
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       submit.disabled = true;
       copyReport.disabled = true;
       downloadReport.disabled = true;
-      summary.textContent = "Connecting and verifying. This can take a few minutes.";
-      reportBox.textContent = "{}";
+      summary.textContent = "Starting verifier job.";
+      reportBox.textContent = "Submitting request...";
       const fields = new FormData(form);
       const body = {
         host: fields.get("host"),
         rpc_port: Number(fields.get("rpc_port") || 16110)
       };
       try {
-        const response = await fetch("/api/verify", {
+        const payload = await fetchJson("/api/verify", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(body)
         });
-        const payload = await response.json();
-        setSummary(payload.report);
-        setReport(payload.report);
+        await pollJob(payload.job_id);
       } catch (error) {
         const payload = { success: false, error: String(error) };
         setSummary(payload);

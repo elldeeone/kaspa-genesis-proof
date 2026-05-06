@@ -59,7 +59,7 @@ pub(crate) trait HeaderStore: HeaderSource {
     fn tips(&mut self) -> Result<(Vec<Hash32>, Hash32)>;
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct VerificationReport {
     pub generated_at_unix_ms: u64,
     pub success: bool,
