@@ -746,6 +746,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
     const copyReport = document.querySelector("#copy-report");
     const downloadReport = document.querySelector("#download-report");
     let latestReport = null;
+    let activeJobId = null;
 
     function setSummary(report) {
       const ok = report && report.success;
@@ -794,15 +795,21 @@ const INDEX_HTML: &str = r##"<!doctype html>
     async function pollJob(jobId) {
       while (true) {
         const status = await fetchJson(`/api/verify/${encodeURIComponent(jobId)}`);
+        if (jobId !== activeJobId) return;
         if (status.report) {
           setSummary(status.report);
           setReport(status.report);
           return;
         }
-        if (status.error && status.status !== "running" && status.status !== "queued") {
+        if (status.status === "completed" || status.status === "failed") {
+          if (status.error) throw new Error(status.error);
+          summary.textContent = "Finalizing report.";
+          reportBox.textContent = (status.lines || []).join("\n") || "Finalizing report.";
+        } else if (status.error && status.status !== "running" && status.status !== "queued") {
           throw new Error(status.error);
+        } else {
+          setProgress(status);
         }
-        setProgress(status);
         await wait(1500);
       }
     }
@@ -814,6 +821,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
       downloadReport.disabled = true;
       summary.textContent = "Starting verifier job.";
       reportBox.textContent = "Submitting request...";
+      activeJobId = null;
       const fields = new FormData(form);
       const body = {
         host: fields.get("host"),
@@ -825,6 +833,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
           headers: { "content-type": "application/json" },
           body: JSON.stringify(body)
         });
+        activeJobId = payload.job_id;
         await pollJob(payload.job_id);
       } catch (error) {
         const payload = { success: false, error: String(error) };
