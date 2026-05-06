@@ -47,6 +47,51 @@ If you downloaded and extracted a release archive, the launcher scripts are at t
 
 In this source repository, those launcher scripts live under `dist/` and are copied into the release archive during packaging.
 
+## Web Verifier
+
+The repository also includes an experimental hosted web verifier:
+
+```bash
+cargo run --bin web
+```
+
+Open:
+
+```text
+http://127.0.0.1:8080
+```
+
+The web verifier asks the user for their node host and RPC port. By default it
+uses:
+
+- user node RPC: `16110`
+- backend proof-source P2P: `16111`
+
+The backend resolves Kaspa mainnet DNS seeders, tries public P2P peers in
+parallel, downloads the first pruning proof that succeeds, and caches it. User
+verification requests then use the user's RPC endpoint for live chain state and
+the backend cache for historical pruning-proof headers.
+
+Optional controls:
+
+```bash
+# Pin a specific backend proof source instead of DNS-seeded public peers.
+KASPA_PROOF_SOURCE_ADDR=host:16111 cargo run --bin web
+
+# Change how many public proof-source peers are raced during startup.
+KASPA_PROOF_SOURCE_PARALLELISM=8 cargo run --bin web
+
+# Change the background pruning-proof refresh interval. Default: 1800 seconds.
+KASPA_PROOF_SOURCE_REFRESH_SECONDS=1800 cargo run --bin web
+
+# Fail startup if the backend cannot warm the pruning-proof cache.
+KASPA_PROOF_REQUIRE_SOURCE_WARMUP=1 cargo run --bin web
+```
+
+Proof execution is serialized inside the web server because the CLI output
+capture is process-global. Concurrent users can submit requests, but proof jobs
+queue so their JSON report logs do not overlap.
+
 ## Independent Verification Inputs
 
 Default mode uses embedded verification data:
