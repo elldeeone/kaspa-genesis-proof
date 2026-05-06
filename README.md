@@ -75,6 +75,9 @@ the backend cache for historical pruning-proof headers.
 Optional controls:
 
 ```bash
+# Listen on a different address. Default: 127.0.0.1:8080.
+KASPA_PROOF_WEB_ADDR=0.0.0.0:18080 cargo run --bin web
+
 # Pin a specific backend proof source instead of DNS-seeded public peers.
 KASPA_PROOF_SOURCE_ADDR=host:16111 cargo run --bin web
 

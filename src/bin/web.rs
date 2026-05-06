@@ -58,7 +58,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/verify", post(verify))
         .with_state(state);
 
-    let addr: SocketAddr = "127.0.0.1:8080".parse()?;
+    let addr: SocketAddr = std::env::var("KASPA_PROOF_WEB_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
+        .parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("Kaspa genesis proof web prototype listening on http://{addr}");
     axum::serve(listener, app).await?;
