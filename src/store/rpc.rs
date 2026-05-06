@@ -228,6 +228,15 @@ fn load_cached_or_fetch_p2p_pruning_proof(
 impl HeaderSource for RpcStore {
     fn get_raw_header(&mut self, block_hash: &Hash32) -> Result<Option<ParsedHeader>> {
         let hash = hex::encode(block_hash);
+
+        if hash == HARDWIRED_GENESIS_HASH_HEX {
+            return Ok(Some(hardwired_genesis_header()?));
+        }
+
+        if let Some(header) = self.proof_headers.get(block_hash) {
+            return Ok(Some(header.clone()));
+        }
+
         let response = self.request(kaspad_request::Payload::GetBlockRequest(
             GetBlockRequestMessage {
                 hash: hash.clone(),
@@ -246,12 +255,6 @@ impl HeaderSource for RpcStore {
                 || message.contains("BlockNotFound")
                 || message.contains("cannot find header")
             {
-                if hash == HARDWIRED_GENESIS_HASH_HEX {
-                    return Ok(Some(hardwired_genesis_header()?));
-                }
-                if let Some(header) = self.proof_headers.get(block_hash) {
-                    return Ok(Some(header.clone()));
-                }
                 return Ok(None);
             }
             bail!("RPC getBlock failed for {hash}: {message}");
