@@ -440,6 +440,8 @@ fn auto_detect_prefers_go_store_for_go_leveldb_datadir() {
     let cli = Cli {
         node_type: CliNodeType::Auto,
         datadir: Some(db_path.clone()),
+        rpc_url: None,
+        p2p_addr: None,
         pre_checkpoint_datadir: None,
         checkpoint_utxos_gz: None,
         json_out: None,

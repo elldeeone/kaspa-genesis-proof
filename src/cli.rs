@@ -25,6 +25,22 @@ pub struct Cli {
 
     #[arg(
         long,
+        value_name = "URL",
+        conflicts_with = "datadir",
+        help = "Experimental gRPC endpoint to use as the current header source, for example grpc://10.0.4.30:16110"
+    )]
+    pub rpc_url: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "ADDR",
+        requires = "rpc_url",
+        help = "Experimental P2P endpoint to fetch pruning proof headers, for example 10.0.4.30:16111"
+    )]
+    pub p2p_addr: Option<String>,
+
+    #[arg(
+        long,
         value_name = "PATH",
         help = "Optional pre-checkpoint Go datadir to reproduce the notebook's external checkpoint/original-genesis verification path"
     )]

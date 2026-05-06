@@ -1,6 +1,7 @@
 mod checkpoint;
 mod go;
 mod probe;
+mod rpc;
 mod rust;
 
 #[cfg(test)]
@@ -15,6 +16,10 @@ use crate::output::print_info;
 
 pub(crate) use checkpoint::CheckpointStore;
 pub(crate) use go::GoStore;
+pub(crate) use rpc::{
+    RpcStore, refresh_p2p_pruning_proof_cache, seed_p2p_pruning_proof_cache,
+    warm_p2p_pruning_proof_cache,
+};
 pub(crate) use rust::RustStore;
 
 pub(crate) struct OpenStoreResult {
@@ -59,6 +64,15 @@ fn detect_and_open_store(node_type: CliNodeType, datadir: &Path) -> Result<Box<d
 }
 
 pub(crate) fn open_store_with_resolved_input(cli: &Cli) -> Result<OpenStoreResult> {
+    if let Some(rpc_url) = cli.rpc_url.as_deref() {
+        let store = RpcStore::connect(rpc_url, cli.p2p_addr.as_deref())?;
+        return Ok(OpenStoreResult {
+            store: Box::new(store),
+            input_path: PathBuf::from(rpc_url),
+            probe_notes: vec![format!("Input source: --rpc-url ({rpc_url})")],
+        });
+    }
+
     if let Some(input_datadir) = cli.datadir.as_deref() {
         let expanded = probe::expand_tilde(input_datadir);
         let store = detect_and_open_store(cli.node_type, &expanded)?;
