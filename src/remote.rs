@@ -5,7 +5,12 @@ use anyhow::Result;
 use crate::checkpoint_utxo::scan_embedded_checkpoint_utxo_dump;
 use crate::cli::{Cli, CliNodeType};
 use crate::model::VerificationReport;
-use crate::output::{build_initial_report, clear_output_capture, output_capture_snapshot};
+use std::sync::{Arc, Mutex};
+
+use crate::output::{
+    begin_scoped_output_capture, build_initial_report, new_scoped_output_capture,
+    scoped_output_capture_snapshot,
+};
 use crate::store::{
     refresh_p2p_pruning_proof_cache, seed_p2p_pruning_proof_cache, warm_p2p_pruning_proof_cache,
 };
@@ -19,8 +24,38 @@ pub struct RemoteProofOptions {
     pub checkpoint_utxos_gz: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug)]
+pub struct RemoteProofOutput {
+    lines: Arc<Mutex<Vec<String>>>,
+}
+
+impl RemoteProofOutput {
+    pub fn new() -> Self {
+        Self {
+            lines: new_scoped_output_capture(),
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<String> {
+        scoped_output_capture_snapshot(&self.lines)
+    }
+}
+
+impl Default for RemoteProofOutput {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn run_remote_proof(options: RemoteProofOptions) -> VerificationReport {
-    clear_output_capture();
+    run_remote_proof_with_output(options, RemoteProofOutput::new())
+}
+
+pub fn run_remote_proof_with_output(
+    options: RemoteProofOptions,
+    output: RemoteProofOutput,
+) -> VerificationReport {
+    let _capture_guard = begin_scoped_output_capture(Arc::clone(&output.lines));
 
     let cli = Cli {
         node_type: CliNodeType::Auto,
@@ -45,12 +80,8 @@ pub fn run_remote_proof(options: RemoteProofOptions) -> VerificationReport {
             report.error = Some(format!("{err:#}"));
         }
     }
-    report.screen_output_lines = output_capture_snapshot();
+    report.screen_output_lines = output.snapshot();
     report
-}
-
-pub fn current_remote_proof_output_lines() -> Vec<String> {
-    output_capture_snapshot()
 }
 
 pub fn warm_up_remote_proof_caches() -> Result<()> {

@@ -10,8 +10,8 @@ use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use genesis_proof::{
-    RemoteProofOptions, VerificationReport, current_remote_proof_output_lines,
-    refresh_remote_pruning_proof_cache_from_p2p, run_remote_proof,
+    RemoteProofOptions, RemoteProofOutput, VerificationReport,
+    refresh_remote_pruning_proof_cache_from_p2p, run_remote_proof, run_remote_proof_with_output,
     seed_remote_pruning_proof_cache_from_p2p, warm_up_remote_proof_caches,
 };
 use serde::{Deserialize, Serialize};
@@ -35,7 +35,6 @@ const MAINNET_DNS_SEEDERS: &[&str] = &[
 struct AppState {
     default_rpc_port: u16,
     proof_source_addr: String,
-    proof_lock: Arc<Mutex<()>>,
     jobs: Arc<Mutex<HashMap<String, ProofJob>>>,
     next_job_id: Arc<AtomicU64>,
 }
@@ -54,6 +53,7 @@ struct ProofJob {
     started_at_unix_ms: u64,
     updated_at_unix_ms: u64,
     lines: Vec<String>,
+    output: RemoteProofOutput,
     report: Option<VerificationReport>,
     error: Option<String>,
 }
@@ -75,7 +75,6 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         default_rpc_port: 16110,
         proof_source_addr,
-        proof_lock: Arc::new(Mutex::new(())),
         jobs: Arc::new(Mutex::new(HashMap::new())),
         next_job_id: Arc::new(AtomicU64::new(1)),
     };
@@ -326,6 +325,7 @@ async fn verify(
         .fetch_add(1, Ordering::Relaxed)
         .to_string();
     let now = now_unix_ms();
+    let output = RemoteProofOutput::new();
     {
         let mut jobs = state.jobs.lock().await;
         jobs.insert(
@@ -337,6 +337,7 @@ async fn verify(
                 started_at_unix_ms: now,
                 updated_at_unix_ms: now,
                 lines: vec!["Queued. Waiting for the verifier worker.".to_string()],
+                output: output.clone(),
                 report: None,
                 error: None,
             },
@@ -367,7 +368,7 @@ async fn verify_status(
     };
 
     if matches!(job.status, ProofJobStatus::Running) {
-        job.lines = current_remote_proof_output_lines();
+        job.lines = job.output.snapshot();
         job.updated_at_unix_ms = now_unix_ms();
     }
 
@@ -391,10 +392,16 @@ fn spawn_verify_job(state: AppState, job_id: String, host: String, rpc_port: u16
     tokio::spawn(async move {
         let rpc_url = format!("grpc://{host}:{rpc_port}");
         let p2p_addr = state.proof_source_addr.clone();
-        let proof_lock = Arc::clone(&state.proof_lock);
         let jobs = Arc::clone(&state.jobs);
 
-        let _proof_guard = proof_lock.lock().await;
+        let output = {
+            let jobs = jobs.lock().await;
+            jobs.get(&job_id).map(|job| job.output.clone())
+        };
+        let Some(output) = output else {
+            return;
+        };
+
         update_job(&jobs, &job_id, |job| {
             job.status = ProofJobStatus::Running;
             job.lines = vec!["Connected to verifier worker. Starting proof.".to_string()];
@@ -403,12 +410,15 @@ fn spawn_verify_job(state: AppState, job_id: String, host: String, rpc_port: u16
         .await;
 
         let report = tokio::task::spawn_blocking(move || {
-            run_remote_proof(RemoteProofOptions {
-                rpc_url,
-                p2p_addr: Some(p2p_addr),
-                pre_checkpoint_datadir: None,
-                checkpoint_utxos_gz: None,
-            })
+            run_remote_proof_with_output(
+                RemoteProofOptions {
+                    rpc_url,
+                    p2p_addr: Some(p2p_addr),
+                    pre_checkpoint_datadir: None,
+                    checkpoint_utxos_gz: None,
+                },
+                output,
+            )
         })
         .await
         .unwrap_or_else(|err| VerificationReport {
@@ -510,9 +520,7 @@ async fn verify_legacy(
     let rpc_port = request.rpc_port.unwrap_or(state.default_rpc_port);
     let rpc_url = format!("grpc://{host}:{rpc_port}");
     let p2p_addr = state.proof_source_addr.clone();
-    let proof_lock = Arc::clone(&state.proof_lock);
 
-    let _proof_guard = proof_lock.lock().await;
     let report = tokio::task::spawn_blocking(move || {
         run_remote_proof(RemoteProofOptions {
             rpc_url,

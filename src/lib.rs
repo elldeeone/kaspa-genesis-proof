@@ -28,8 +28,7 @@ pub use app::run_cli;
 pub use cli::{Cli, CliNodeType};
 pub use model::VerificationReport;
 pub use remote::{
-    RemoteProofOptions, current_remote_proof_output_lines,
-    refresh_remote_pruning_proof_cache_from_p2p, run_remote_proof,
-    seed_remote_pruning_proof_cache_from_p2p, warm_up_remote_proof_caches,
-    warm_up_remote_proof_caches_from_p2p,
+    RemoteProofOptions, RemoteProofOutput, refresh_remote_pruning_proof_cache_from_p2p,
+    run_remote_proof, run_remote_proof_with_output, seed_remote_pruning_proof_cache_from_p2p,
+    warm_up_remote_proof_caches, warm_up_remote_proof_caches_from_p2p,
 };

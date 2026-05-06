@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
+use std::cell::RefCell;
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cli::{Cli, CliNodeType};
@@ -10,6 +11,20 @@ use crate::constants::{BLUE, BOLD, END, GREEN, RED, YELLOW};
 use crate::model::VerificationReport;
 
 static OUTPUT_CAPTURE: std::sync::OnceLock<Mutex<Vec<String>>> = std::sync::OnceLock::new();
+
+thread_local! {
+    static SCOPED_OUTPUT_CAPTURE: RefCell<Option<Arc<Mutex<Vec<String>>>>> = const { RefCell::new(None) };
+}
+
+pub(crate) struct ScopedOutputCaptureGuard;
+
+impl Drop for ScopedOutputCaptureGuard {
+    fn drop(&mut self) {
+        SCOPED_OUTPUT_CAPTURE.with(|capture| {
+            *capture.borrow_mut() = None;
+        });
+    }
+}
 
 pub(crate) fn print_header(text: &str) {
     let sep = "=".repeat(60);
@@ -63,6 +78,20 @@ pub(crate) fn clear_output_capture() {
 }
 
 pub(crate) fn capture_output_line(line: &str) {
+    let captured = SCOPED_OUTPUT_CAPTURE.with(|capture| {
+        if let Some(lines) = capture.borrow().as_ref() {
+            if let Ok(mut lines) = lines.lock() {
+                lines.push(line.to_string());
+            }
+            true
+        } else {
+            false
+        }
+    });
+    if captured {
+        return;
+    }
+
     if let Ok(mut lines) = output_capture().lock() {
         lines.push(line.to_string());
     }
@@ -75,11 +104,64 @@ pub(crate) fn output_capture_snapshot() -> Vec<String> {
         .unwrap_or_default()
 }
 
+pub(crate) fn new_scoped_output_capture() -> Arc<Mutex<Vec<String>>> {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+pub(crate) fn begin_scoped_output_capture(
+    lines: Arc<Mutex<Vec<String>>>,
+) -> ScopedOutputCaptureGuard {
+    if let Ok(mut lines) = lines.lock() {
+        lines.clear();
+    }
+    SCOPED_OUTPUT_CAPTURE.with(|capture| {
+        *capture.borrow_mut() = Some(lines);
+    });
+    ScopedOutputCaptureGuard
+}
+
+pub(crate) fn scoped_output_capture_snapshot(lines: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+    lines.lock().map(|lines| lines.clone()).unwrap_or_default()
+}
+
 pub(crate) fn now_millis() -> Result<u64> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock appears to be before Unix epoch")?;
     u64::try_from(now.as_millis()).context("current time millis does not fit in u64")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+
+    #[test]
+    fn scoped_output_capture_is_thread_local() {
+        let left = new_scoped_output_capture();
+        let right = new_scoped_output_capture();
+
+        let left_thread = {
+            let left = Arc::clone(&left);
+            thread::spawn(move || {
+                let _guard = begin_scoped_output_capture(Arc::clone(&left));
+                capture_output_line("left one");
+                capture_output_line("left two");
+                scoped_output_capture_snapshot(&left)
+            })
+        };
+        let right_thread = {
+            let right = Arc::clone(&right);
+            thread::spawn(move || {
+                let _guard = begin_scoped_output_capture(Arc::clone(&right));
+                capture_output_line("right one");
+                scoped_output_capture_snapshot(&right)
+            })
+        };
+
+        assert_eq!(left_thread.join().unwrap(), vec!["left one", "left two"]);
+        assert_eq!(right_thread.join().unwrap(), vec!["right one"]);
+    }
 }
 
 pub(crate) fn format_duration_ms(ms: u64) -> String {
