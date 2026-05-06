@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::{ConnectInfo, Path, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -90,7 +90,11 @@ async fn main() -> anyhow::Result<()> {
         .parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("Kaspa genesis proof web prototype listening on http://{addr}");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -271,8 +275,35 @@ fn spawn_pruning_proof_refresh_loop(proof_source_addr: String) {
     });
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+async fn index(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Html<String> {
+    let client_host =
+        client_host_from_headers(&headers).unwrap_or_else(|| remote_addr.ip().to_string());
+    Html(INDEX_HTML.replace("__CLIENT_HOST__", &client_host))
+}
+
+fn client_host_from_headers(headers: &HeaderMap) -> Option<String> {
+    let candidate = headers
+        .get("cf-connecting-ip")
+        .or_else(|| headers.get("x-real-ip"))
+        .or_else(|| headers.get("x-forwarded-for"))?
+        .to_str()
+        .ok()?
+        .split(',')
+        .next()?
+        .trim();
+
+    is_safe_host_value(candidate).then(|| candidate.to_string())
+}
+
+fn is_safe_host_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | ':'))
 }
 
 async fn verify(
@@ -688,7 +719,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
     <form id="verify-form">
       <label>WAN IP or host
-        <input id="host" name="host" value="10.0.4.30" autocomplete="off" required>
+        <input id="host" name="host" value="__CLIENT_HOST__" autocomplete="off" required>
       </label>
       <label>RPC
         <input id="rpc-port" name="rpc_port" type="number" min="1" max="65535" value="16110">
