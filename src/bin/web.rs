@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -17,6 +18,7 @@ use genesis_proof::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
+use tower_http::services::ServeDir;
 
 const DEFAULT_P2P_PORT: u16 = 16111;
 const MAINNET_DNS_SEEDERS: &[&str] = &[
@@ -35,6 +37,7 @@ const MAINNET_DNS_SEEDERS: &[&str] = &[
 struct AppState {
     default_rpc_port: u16,
     proof_source_addr: String,
+    static_dir: PathBuf,
     jobs: Arc<Mutex<HashMap<String, ProofJob>>>,
     next_job_id: Arc<AtomicU64>,
 }
@@ -75,11 +78,14 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         default_rpc_port: 16110,
         proof_source_addr,
+        static_dir: static_dir()?,
         jobs: Arc::new(Mutex::new(HashMap::new())),
         next_job_id: Arc::new(AtomicU64::new(1)),
     };
+    let static_service = ServeDir::new(state.static_dir.clone());
     let app = Router::new()
         .route("/", get(index))
+        .nest_service("/static", static_service)
         .route("/api/verify", post(verify))
         .route("/api/verify/{job_id}", get(verify_status))
         .with_state(state);
@@ -95,6 +101,23 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     Ok(())
+}
+
+fn static_dir() -> anyhow::Result<PathBuf> {
+    let path = std::env::var("KASPA_PROOF_STATIC_DIR")
+        .map(PathBuf::from)
+        .map_err(|_| anyhow::anyhow!("KASPA_PROOF_STATIC_DIR must point to the frontend assets"))?;
+    if !path.is_dir() {
+        anyhow::bail!(
+            "KASPA_PROOF_STATIC_DIR is not a directory: {}",
+            path.display()
+        );
+    }
+    let index_path = path.join("index.html");
+    if !index_path.is_file() {
+        anyhow::bail!("missing frontend entrypoint: {}", index_path.display());
+    }
+    Ok(path)
 }
 
 async fn warm_startup_caches() -> anyhow::Result<String> {
@@ -275,12 +298,22 @@ fn spawn_pruning_proof_refresh_loop(proof_source_addr: String) {
 }
 
 async fn index(
+    State(state): State<AppState>,
     ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-) -> Html<String> {
+) -> Result<Html<String>, (StatusCode, String)> {
     let client_host =
         client_host_from_headers(&headers).unwrap_or_else(|| remote_addr.ip().to_string());
-    Html(INDEX_HTML.replace("__CLIENT_HOST__", &client_host))
+    let index_path = state.static_dir.join("index.html");
+    let html = tokio::fs::read_to_string(&index_path)
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed reading {}: {err}", index_path.display()),
+            )
+        })?;
+    Ok(Html(html.replace("__CLIENT_HOST__", &client_host)))
 }
 
 fn client_host_from_headers(headers: &HeaderMap) -> Option<String> {
@@ -555,456 +588,3 @@ impl VerifyResponse {
         }
     }
 }
-
-const INDEX_HTML: &str = r##"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Kaspa Genesis Proof</title>
-  <style>
-    :root {
-      color-scheme: light;
-      --ink: #161411;
-      --muted: #625d54;
-      --paper: #f7f3ea;
-      --line: #282018;
-      --field: #fffaf0;
-      --ok: #12795a;
-      --bad: #aa3030;
-      --accent: #1e8f86;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      color: var(--ink);
-      background:
-        linear-gradient(90deg, rgba(22,20,17,.05) 1px, transparent 1px),
-        linear-gradient(rgba(22,20,17,.04) 1px, transparent 1px),
-        var(--paper);
-      background-size: 28px 28px;
-      font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
-    }
-    main {
-      width: min(1120px, calc(100vw - 32px));
-      margin: 0 auto;
-      padding: 40px 0;
-    }
-    header {
-      display: grid;
-      grid-template-columns: minmax(0, 1.15fr) minmax(280px, .85fr);
-      gap: 28px;
-      align-items: end;
-      min-height: 34vh;
-      border-bottom: 2px solid var(--line);
-      padding-bottom: 28px;
-    }
-    h1 {
-      margin: 0;
-      max-width: 820px;
-      font-size: clamp(48px, 9vw, 116px);
-      line-height: .86;
-      letter-spacing: 0;
-      font-weight: 900;
-    }
-    .lede {
-      margin: 18px 0 0;
-      max-width: 680px;
-      color: var(--muted);
-      font: 18px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    }
-    .status-strip {
-      border: 2px solid var(--line);
-      background: var(--field);
-      padding: 18px;
-      box-shadow: 8px 8px 0 var(--line);
-      font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    }
-    .status-strip b { display: block; margin-bottom: 8px; }
-    form {
-      display: grid;
-      grid-template-columns: minmax(240px, 1fr) 120px auto;
-      gap: 12px;
-      align-items: end;
-      margin: 32px 0 24px;
-    }
-    label {
-      display: grid;
-      gap: 7px;
-      color: var(--muted);
-      font: 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      text-transform: uppercase;
-    }
-    input, button {
-      min-height: 48px;
-      border: 2px solid var(--line);
-      border-radius: 0;
-      color: var(--ink);
-      background: var(--field);
-      font: 18px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      padding: 0 14px;
-    }
-    button {
-      cursor: pointer;
-      background: var(--accent);
-      color: white;
-      font-weight: 800;
-      box-shadow: 5px 5px 0 var(--line);
-    }
-    button:disabled {
-      cursor: wait;
-      filter: grayscale(.8);
-      opacity: .72;
-    }
-    .actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin: -8px 0 24px;
-      justify-content: flex-end;
-    }
-    .actions button {
-      min-height: 38px;
-      padding: 0 12px;
-      font-size: 13px;
-      box-shadow: 3px 3px 0 var(--line);
-      background: var(--field);
-      color: var(--ink);
-    }
-    .result {
-      display: grid;
-      grid-template-columns: 280px minmax(0, 1fr);
-      gap: 18px;
-      align-items: start;
-    }
-    .summary, .report-panel {
-      border: 2px solid var(--line);
-      background: var(--field);
-    }
-    .summary {
-      min-height: 160px;
-      padding: 18px;
-      font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      overflow-wrap: anywhere;
-    }
-    .summary-row {
-      display: grid;
-      grid-template-columns: 92px minmax(0, 1fr);
-      gap: 10px;
-      margin-top: 8px;
-    }
-    .summary-row .label {
-      color: var(--muted);
-      text-transform: uppercase;
-      font-size: 11px;
-      line-height: 1.7;
-    }
-    .summary-row .value {
-      min-width: 0;
-      overflow-wrap: anywhere;
-    }
-    .badge {
-      display: inline-block;
-      margin-bottom: 14px;
-      padding: 6px 9px;
-      border: 2px solid currentColor;
-      font-weight: 900;
-    }
-    .badge.ok { color: var(--ok); }
-    .badge.bad { color: var(--bad); }
-    .report-panel {
-      min-height: 360px;
-      max-height: 60vh;
-      overflow: auto;
-      margin: 0;
-      padding: 18px;
-      font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    }
-    .report-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
-      margin-bottom: 16px;
-    }
-    .metric {
-      border: 1px solid rgba(40, 32, 24, .45);
-      padding: 12px;
-      background: rgba(255, 255, 255, .38);
-    }
-    .metric .label, .section-title {
-      color: var(--muted);
-      font-size: 11px;
-      line-height: 1;
-      text-transform: uppercase;
-      letter-spacing: 0;
-      font-weight: 800;
-    }
-    .metric .value {
-      margin-top: 8px;
-      font-size: 16px;
-      font-weight: 900;
-      overflow-wrap: anywhere;
-    }
-    .report-section {
-      border-top: 1px solid rgba(40, 32, 24, .35);
-      padding-top: 14px;
-      margin-top: 14px;
-    }
-    .kv {
-      display: grid;
-      grid-template-columns: minmax(150px, .32fr) minmax(0, 1fr);
-      gap: 10px;
-      padding: 8px 0;
-      border-bottom: 1px solid rgba(40, 32, 24, .12);
-    }
-    .kv:last-child { border-bottom: 0; }
-    .kv .key {
-      color: var(--muted);
-      text-transform: uppercase;
-      font-size: 11px;
-      line-height: 1.6;
-    }
-    .kv .val {
-      min-width: 0;
-      overflow-wrap: anywhere;
-    }
-    .tips-list {
-      display: grid;
-      gap: 6px;
-      margin-top: 10px;
-    }
-    .tip-hash {
-      overflow-wrap: anywhere;
-      padding: 8px;
-      background: rgba(40, 32, 24, .055);
-      border-left: 3px solid var(--accent);
-    }
-    .log {
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-    }
-    @media (max-width: 800px) {
-      header, form, .result { grid-template-columns: 1fr; }
-      h1 { font-size: clamp(44px, 18vw, 78px); }
-      .report-grid, .kv, .summary-row { grid-template-columns: 1fr; }
-    }
-  </style>
-</head>
-<body>
-  <main>
-    <header>
-      <div>
-        <h1>Kaspa Genesis Proof</h1>
-        <p class="lede">Verifies your Kaspa node's current state back to genesis.</p>
-      </div>
-      <aside class="status-strip">
-        <b>Required forward</b>
-        RPC: 16110<br>
-        The backend supplies the pruning-proof cache.
-      </aside>
-    </header>
-
-    <form id="verify-form">
-      <label>WAN IP or host
-        <input id="host" name="host" value="__CLIENT_HOST__" autocomplete="off" required>
-      </label>
-      <label>RPC
-        <input id="rpc-port" name="rpc_port" type="number" min="1" max="65535" value="16110">
-      </label>
-      <button id="submit" type="submit">Verify</button>
-    </form>
-
-    <div class="actions">
-      <button id="copy-report" type="button" disabled>Copy JSON</button>
-      <button id="download-report" type="button" disabled>Save JSON</button>
-    </div>
-
-    <section class="result">
-      <div class="summary" id="summary">Waiting for a node.</div>
-      <div class="report-panel" id="report">No report yet.</div>
-    </section>
-  </main>
-
-  <script>
-    const form = document.querySelector("#verify-form");
-    const submit = document.querySelector("#submit");
-    const summary = document.querySelector("#summary");
-    const reportBox = document.querySelector("#report");
-    const copyReport = document.querySelector("#copy-report");
-    const downloadReport = document.querySelector("#download-report");
-    let latestReport = null;
-    let activeJobId = null;
-
-    function escapeHtml(value) {
-      return String(value ?? "n/a")
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
-    }
-
-    function shortHash(value) {
-      if (!value) return "n/a";
-      return value.length > 22 ? `${value.slice(0, 14)}...${value.slice(-8)}` : value;
-    }
-
-    function kv(label, value) {
-      return `<div class="kv"><div class="key">${escapeHtml(label)}</div><div class="val">${escapeHtml(value)}</div></div>`;
-    }
-
-    function metric(label, value) {
-      return `<div class="metric"><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(value)}</div></div>`;
-    }
-
-    function setSummary(report) {
-      const ok = report && report.success;
-      summary.innerHTML = [
-        `<span class="badge ${ok ? "ok" : "bad"}">${ok ? "PASSED" : "FAILED"}</span>`,
-        `<div class="summary-row"><div class="label">Tips</div><div class="value">${escapeHtml(report.tips_count ?? "n/a")}</div></div>`,
-        `<div class="summary-row"><div class="label">Tip</div><div class="value" title="${escapeHtml(report.chain_tip_used ?? "")}">${escapeHtml(shortHash(report.chain_tip_used))}</div></div>`,
-        `<div class="summary-row"><div class="label">Total</div><div class="value">${escapeHtml(report.checkpoint_total_kas ?? "n/a")}</div></div>`,
-        `<div class="summary-row"><div class="label">Error</div><div class="value">${escapeHtml(report.error ?? "none")}</div></div>`
-      ].join("");
-    }
-
-    function renderReport(report) {
-      if (!report) return "No report yet.";
-      const tips = Array.isArray(report.tips) && report.tips.length
-        ? `<div class="tips-list">${report.tips.map((tip) => `<div class="tip-hash">${escapeHtml(tip)}</div>`).join("")}</div>`
-        : `<div class="tip-hash">n/a</div>`;
-      return `
-        <div class="report-grid">
-          ${metric("Result", report.success ? "Passed" : "Failed")}
-          ${metric("Tips", report.tips_count ?? "n/a")}
-          ${metric("Checkpoint Total", report.checkpoint_total_kas ?? "n/a")}
-        </div>
-        <div class="report-section">
-          <div class="section-title">Chain State</div>
-          ${kv("Selected Tip", report.chain_tip_used)}
-          ${kv("Active Genesis", report.active_genesis_hash)}
-          ${kv("Resolved Node", report.resolved_db_path || report.resolved_input_path)}
-          ${kv("Store Type", report.store_type)}
-          ${kv("Tip Age", report.tip_age_ms != null ? `${Math.round(report.tip_age_ms / 1000)}s` : "n/a")}
-        </div>
-        <div class="report-section">
-          <div class="section-title">Checkpoint</div>
-          ${kv("Dump Verified", report.checkpoint_utxo_dump_verified ? "yes" : "no")}
-          ${kv("Records", report.checkpoint_utxo_dump_records)}
-          ${kv("Commitment", report.checkpoint_utxo_commitment)}
-          ${kv("DAA Score", report.checkpoint_daa_score)}
-          ${kv("Reference Baseline", report.checkpoint_reference_baseline_kas)}
-          ${kv("Excess Over Reference", report.checkpoint_excess_over_reference_kas)}
-          ${kv("Source", report.checkpoint_utxo_dump_source)}
-        </div>
-        <div class="report-section">
-          <div class="section-title">Tips</div>
-          ${tips}
-        </div>
-        ${report.error ? `<div class="report-section">${kv("Error", report.error)}</div>` : ""}
-      `;
-    }
-
-    function setReport(report) {
-      latestReport = report;
-      reportBox.innerHTML = renderReport(report);
-      copyReport.disabled = !report;
-      downloadReport.disabled = !report;
-    }
-
-    function setProgress(status) {
-      const lines = status.lines || [];
-      const elapsed = status.started_at_unix_ms
-        ? Math.max(0, Math.round((Date.now() - status.started_at_unix_ms) / 1000))
-        : 0;
-      const state = (status.status || "queued").replaceAll("_", " ");
-      summary.textContent = `${state}. Elapsed ${elapsed}s.`;
-      reportBox.innerHTML = `<div class="log">${escapeHtml(lines.length ? lines.join("\n") : "Waiting for verifier output...")}</div>`;
-    }
-
-    async function fetchJson(url, options) {
-      const response = await fetch(url, options);
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || `HTTP ${response.status}`);
-      }
-      return payload;
-    }
-
-    function wait(ms) {
-      return new Promise((resolve) => setTimeout(resolve, ms));
-    }
-
-    async function pollJob(jobId) {
-      while (true) {
-        const status = await fetchJson(`/api/verify/${encodeURIComponent(jobId)}`);
-        if (jobId !== activeJobId) return;
-        if (status.report) {
-          setSummary(status.report);
-          setReport(status.report);
-          return;
-        }
-        if (status.status === "completed" || status.status === "failed") {
-          if (status.error) throw new Error(status.error);
-          summary.textContent = "Finalizing report.";
-          reportBox.innerHTML = `<div class="log">${escapeHtml((status.lines || []).join("\n") || "Finalizing report.")}</div>`;
-        } else if (status.error && status.status !== "running" && status.status !== "queued") {
-          throw new Error(status.error);
-        } else {
-          setProgress(status);
-        }
-        await wait(1500);
-      }
-    }
-
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      submit.disabled = true;
-      copyReport.disabled = true;
-      downloadReport.disabled = true;
-      summary.textContent = "Starting verifier job.";
-      reportBox.innerHTML = `<div class="log">Submitting request...</div>`;
-      activeJobId = null;
-      const fields = new FormData(form);
-      const body = {
-        host: fields.get("host"),
-        rpc_port: Number(fields.get("rpc_port") || 16110)
-      };
-      try {
-        const payload = await fetchJson("/api/verify", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body)
-        });
-        activeJobId = payload.job_id;
-        await pollJob(payload.job_id);
-      } catch (error) {
-        const payload = { success: false, error: String(error) };
-        setSummary(payload);
-        setReport(payload);
-      } finally {
-        submit.disabled = false;
-      }
-    });
-
-    copyReport.addEventListener("click", async () => {
-      if (!latestReport) return;
-      await navigator.clipboard.writeText(JSON.stringify(latestReport, null, 2));
-      copyReport.textContent = "Copied";
-      setTimeout(() => { copyReport.textContent = "Copy JSON"; }, 1200);
-    });
-
-    downloadReport.addEventListener("click", () => {
-      if (!latestReport) return;
-      const blob = new Blob([JSON.stringify(latestReport, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `kaspa-genesis-proof-${latestReport.chain_tip_used || "report"}.json`;
-      link.click();
-      URL.revokeObjectURL(url);
-    });
-  </script>
-</body>
-</html>
-"##;

@@ -52,7 +52,7 @@ In this source repository, those launcher scripts live under `dist/` and are cop
 The repository also includes an experimental hosted web verifier:
 
 ```bash
-cargo run --bin web
+KASPA_PROOF_STATIC_DIR=static cargo run --bin web
 ```
 
 Open:
@@ -75,6 +75,9 @@ the backend cache for historical pruning-proof headers.
 Optional controls:
 
 ```bash
+# Required frontend asset directory. Must contain index.html.
+KASPA_PROOF_STATIC_DIR=static cargo run --bin web
+
 # Listen on a different address. Default: 127.0.0.1:8080.
 KASPA_PROOF_WEB_ADDR=0.0.0.0:18080 cargo run --bin web
 
@@ -94,6 +97,14 @@ KASPA_PROOF_REQUIRE_SOURCE_WARMUP=1 cargo run --bin web
 Proof execution is serialized inside the web server because the CLI output
 capture is process-global. Concurrent users can submit requests, but proof jobs
 queue so their JSON report logs do not overlap.
+
+Frontend assets are loaded from `KASPA_PROOF_STATIC_DIR` at request time. A
+frontend-only VPS update can sync `static/` to the mounted asset directory
+without rebuilding or restarting the backend container:
+
+```bash
+rsync -av --delete static/ root@77.42.40.7:/opt/kaspa-genesis-proof-web/static/
+```
 
 ## Independent Verification Inputs
 
