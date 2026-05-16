@@ -225,6 +225,14 @@
       white-space: pre-wrap;
       overflow-wrap: anywhere;
     }
+    .transcript {
+      margin-top: 10px;
+      padding: 12px;
+      background: rgba(40, 32, 24, .055);
+      border-left: 3px solid var(--accent);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
     @media (max-width: 800px) {
       header, form, .result { grid-template-columns: 1fr; }
       h1 { font-size: clamp(44px, 18vw, 78px); }
@@ -299,6 +307,17 @@
       return `<div class="metric"><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(value)}</div></div>`;
     }
 
+    function renderTranscript(report) {
+      const lines = Array.isArray(report.screen_output_lines) ? report.screen_output_lines : [];
+      if (!lines.length) return "";
+      return `
+        <div class="report-section">
+          <div class="section-title">Verification Transcript</div>
+          <div class="transcript">${escapeHtml(lines.join("\n"))}</div>
+        </div>
+      `;
+    }
+
     function setSummary(report) {
       const ok = report && report.success;
       summary.innerHTML = [
@@ -321,6 +340,7 @@
           ${metric("Tips", report.tips_count ?? "n/a")}
           ${metric("Checkpoint Total", report.checkpoint_total_kas ?? "n/a")}
         </div>
+        ${renderTranscript(report)}
         <div class="report-section">
           <div class="section-title">Chain State</div>
           ${kv("Selected Tip", report.chain_tip_used)}
